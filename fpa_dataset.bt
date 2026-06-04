@@ -3,10 +3,17 @@
 //
 // File:        fpa_dataset.bt
 // Author:      MQB-coding
-// Revision:    10000
+// Revision:    10001
 // Purpose:     VAG MQB FPA (fahrprofilauswahl / driving profile) dataset parsing
 // Comments:    red = unknown, yellow = possible, green = sure, gray = doesn't look very relevant.
 //              Currently only useful for FPA datasets for 3Q0907530Q and newer.
+//
+// Changes vs r10000:
+//   - Annotated several PHEV-region unknowns with hypothesised semantics derived
+//     from MIB infotainment Java decompile (DSi serializers under
+//     de/esolutions/fw/comm/dsi/carhybrid/ + cardrivingcharacteristics/).
+//     All annotations are SPECULATIVE — confidence levels marked per field.
+//     No byte layout changes; only comments. See per-field SPECULATION notes.
 //
 // Changes vs r9999:
 //   - control_is_allowed_to_change (0x296) bit-field relabeled. New mapping:
@@ -663,9 +670,14 @@ struct{
     
     // note: there are quite a few 14-sized shapes in this area...
     
-    ushort PHEV_unknown_AFC <bgcolor=cDkRed>;   // always 0 0, except on MZ: 8 0
-    ushort PHEV_unknown_AFE <bgcolor=cRed>;     // always 0 0, except on MZ: 8 0
-    ushort PHEV_unknown_B00 <bgcolor=cDkRed>;   // always 0 0, except on MZ: 8 0
+    // SPECULATION (~50% confidence): three fields together match the Java
+    // `HybridTargetRangeSerializer` wire layout — int16(maxRange) +
+    // int16(currentRange) + int32(rangeUnit). Only MZ00 has non-zero values
+    // (8/8/8) so n=1 — cannot distinguish from 3 separate ushorts. Keep as
+    // ushorts pending more PHEV examples; field names provisional.
+    ushort PHEV_unknown_AFC <bgcolor=cDkRed, comment="Hyp. HybridTargetRange.maxRange (int16)">;   // always 0 0, except on MZ: 8 0
+    ushort PHEV_unknown_AFE <bgcolor=cRed, comment="Hyp. HybridTargetRange.currentRange (int16)">; // always 0 0, except on MZ: 8 0
+    ushort PHEV_unknown_B00 <bgcolor=cDkRed, comment="Hyp. HybridTargetRange.rangeUnit low word (int32 spans B00..B03)">; // always 0 0, except on MZ: 8 0
     ubyte PHEV_unknown_B02[5] <bgcolor=cDkGray, fgcolor=cGray , hidden=true>; // always 0
     ubyte PHEV_unknown_B08[4] <bgcolor=cDkRed>; // always 255 255, 255, 255, except on MZ: 255, 12, 12, 12
     ubyte PHEV_unknown_B0C[4] <bgcolor=cDkGray, fgcolor=cGray , hidden=true>; // always 0xFF
@@ -677,11 +689,25 @@ struct{
     ushort PHEV_unknown_BBA[10] <bgcolor=cLtRed>;    // see excelsheet
     ubyte PHEV_unknown_BCE[10] <bgcolor=cDkRed>;     // see excelsheet
 
+    // SPECULATION (~40% confidence): four 32-byte rows form a structured
+    // lookup table (state-transition or priority table). Datasets cluster into
+    // 4 templates by exact row contents:
+    //   * "mainstream PHEV" (15 datasets: O2/O3/O4/O5/ON/OO/OV/P2/P3/P4/PG/PJ/PK/PL/TE):
+    //     row0 = [9,22,9,21,9,23,9,20, 0,0,4, ...] — pairs where 2nd byte of
+    //     each pair lines up with AID-banner enum values 20..23 ("driving mode
+    //     unable / not available" set). Strongly suggests rows encode
+    //     (mode_id, aid_banner_id) pairs for system-state messages.
+    //   * "Audi cluster" (KV00/N100/N800) — different template
+    //   * "Arteon R" (PD00/PH00/PO00) — minimal (1 pair per row)
+    //   * "Tiguan R" (PF00) — variant of Arteon R
+    // Java RA0..RA7Serializer files in extract_1447 likely document exact
+    // per-record fields; not yet decoded. Byte-10 hypothesis as length-prefix
+    // disproven (P300 byte10=[4,3,2,2] but actual pair counts all=4).
     struct {
-        ubyte PHEV_unknown_BD8_table_1[32] <bgcolor=cRed>;     // see excelsheet, could be like a controls list?
-        ubyte PHEV_unknown_BD8_table_2[32] <bgcolor=cDkRed>;   // see excelsheet, could be hybrid mode 1?
-        ubyte PHEV_unknown_BD8_table_3[32] <bgcolor=cRed>;     // see excelsheet, could be hybrid mode 2?
-        ubyte PHEV_unknown_BD8_table_4[32] <bgcolor=cDkRed>;   // see excelsheet, could be hybrid mode 3?
+        ubyte PHEV_unknown_BD8_table_1[32] <bgcolor=cRed, comment="Hyp. (mode_id, aid_banner_id)*4 + tail">;
+        ubyte PHEV_unknown_BD8_table_2[32] <bgcolor=cDkRed, comment="Hyp. transition/priority row 2">;
+        ubyte PHEV_unknown_BD8_table_3[32] <bgcolor=cRed, comment="Hyp. transition/priority row 3">;
+        ubyte PHEV_unknown_BD8_table_4[32] <bgcolor=cDkRed, comment="Hyp. transition/priority row 4">;
     } PHEV_unknown_BD8_table;
     
     ubyte PHEV_unknown_C58[22] <bgcolor=cLtRed>;     // see excelsheet
@@ -702,7 +728,21 @@ struct{
     // 34   0 28  27  : O2, O3, O4, O5, ON, OO, OV, P2, P3, P4, PG, PJ, PK, PL, TE   
 
     ubyte PHEV_unknown_CE1[11] <bgcolor=cDkGray, fgcolor=cGray , hidden=true>; // always 0
-    ubyte PHEV_unknown_CEC[1] <bgcolor=cRed>;
+    // SPECULATION (~75% confidence — strongest of the PHEV-region hypotheses):
+    // Maps to Java `BatteryControlProfileOperationSerializer` (8-bit bitmask):
+    //   bit 0: charge
+    //   bit 1: climate
+    //   bit 2: climateWithoutExternalSupply
+    //   bit 3: autoDefrost
+    //   bit 4: seatHeaterFrontLeft
+    //   bit 5: seatHeaterFrontRight
+    //   bit 6: seatHeaterRearLeft
+    //   bit 7: seatHeaterRearRight
+    // Observed: 0 (none), 1 (charge only — full EVs e-Golf/O400/O500), 5
+    // (bits 0+2 = charge + climateWithoutExternalSupply — all mainstream PHEVs:
+    // Magotan/Tiguan/Passat/Arteon/Tarraco GTE). Alternative ChargeMode-enum
+    // interpretation (5=DC+CONDITIONING) ruled out because PHEVs are AC-only.
+    ubyte PHEV_unknown_CEC[1] <bgcolor=cRed, comment="Hyp. BatteryControl ProfileOperation 8-bit mask (charge|climate*|seat*)">;
     // known decimal values:
     // 0    
     // 1:   O4, O5, P2
@@ -738,12 +778,32 @@ struct{
     // observed values: 0..4 mixed with stride-2 zeros (e.g. P300 [1,0,0,1,0,2,
     // 0,3,0,4,0,2]). Preserve verbatim on save.
     
-    ubyte PHEV_unknown_D24[192] <bgcolor=cDkRed >;
+    // SPECULATION (~35% confidence): 192 bytes = 12 records of 16 bytes each.
+    // Per-record structure observed across PHEV datasets:
+    //   chunk[0] header pattern (P300/TE00/MZ00):
+    //     [0,0,0, 32, 0, 5, 2, 0, 1, 0, 5, 0, 3, 0, 0, 255]
+    //   - byte 3 (32), byte 8 (1), byte 12 (3) appear constant per platform
+    //   - byte 5 (5/10), byte 6 (2/250), byte 10 (5/1) vary by platform
+    //   - byte 15 = 0xFF = consistent end-of-record marker
+    // Plausibly 12 hybrid-mode-slots × 16-byte BatteryControl record. Field
+    // semantics unknown without RA-serializer cross-reference. Bytes preserved
+    // verbatim by all known tooling.
+    ubyte PHEV_unknown_D24[192] <bgcolor=cDkRed, comment="Hyp. 12 hybrid-slot records × 16 bytes (end-marker 0xFF at byte15)">;
 
-    ubyte PHEV_unknown_DE4[12] <bgcolor=cLtRed>;
+    // SPECULATION (~55% confidence): 12-byte lookup table mapping internal
+    // hybrid-slot index to an FPA profile-id default. Values fit Python's
+    // dict_profiles namespace (1..15) — NOT the smaller CharismaProfilesSerializer
+    // enum (max 12). Empirically TWO templates exist:
+    //   * 16 datasets: (6,5,1,4,1,3,2,1,1, 14, 13, 1)  ← older GTE-era
+    //   * 15 datasets: (6,5,1,4,1,3,2,1,1,  6,  5, 1)  ← newer GTE-era
+    // Difference at positions 9,10: 14/13 = HybridArea/HybridCharge vs 6/5 =
+    // Race/Eco — strongly suggests firmware-generation difference. Per-slot
+    // semantics (which hybrid sub-mode each slot represents) unknown.
+    ubyte PHEV_unknown_DE4[12] <bgcolor=cLtRed, comment="Hyp. hybrid-slot to profile-id default lookup">;
     // on cars with a hybrid profile, this is always:
-    // 6 5 1 4 1 3 2 1 1 14 13 1
-    // otherwise it's zeroes.   
+    // 6 5 1 4 1 3 2 1 1 14 13 1   (older template)
+    // 6 5 1 4 1 3 2 1 1  6  5 1   (newer template — 2022+)
+    // otherwise it's zeroes.
 
     ubyte PHEV_unknown_DF0[6] <bgcolor=cRed>;
     // zeroes, but on MZ it's 0 0 3 0 0 0 
@@ -765,7 +825,15 @@ struct{
     ubyte PHEV_unknown_E4A[4] <bgcolor=cRed>;
     ubyte PHEV_unknown_E4F[8] <bgcolor=cLtRed>; // 2 0 0 0 0 0 0 0  on MZ, 0 on all others
     ubyte PHEV_unknown_E56[64] <bgcolor=cRed>; // looks to be 8x8 bytes or so
-    ubyte PHEV_unknown_E96[7] <bgcolor=cDkRed>; // on Hybrid cars: 138 37 1 34 0 174 0 
+    // SPECULATION (~30% confidence): 7-byte config block with byte 5 always
+    // 0xAE (174) as constant marker. Four templates observed:
+    //   * [138, 37, 1, 34, 0, 174, 0] — 16x mainstream PHEV
+    //   * [130, 36, 5, 34, 0, 174, 0] — 14x newer PHEV
+    //   * [  0,  0, 0,  0, 0, 174, 0] —  3x edge cases
+    //   * [130, 36, 1, 34, 0, 174, 0] —  1x
+    // Bytes 0..2 vary by template; bytes 3=34, 4=0, 5=174, 6=0 mostly constant.
+    // No Java mapping yet identified. Preserve verbatim.
+    ubyte PHEV_unknown_E96[7] <bgcolor=cDkRed, comment="Hyp. config block (byte5=0xAE marker)">; // on Hybrid cars: 138 37 1 34 0 174 0
     // AID_mode_banner (0xE9D) — AID banner per hybrid-mode SLOT (NOT per FPA
     // profile slot). Index aligns with hybrid_modes[] above; profiles_aid_banner
     // at 0x8C2 is the per-profile equivalent. Like hybrid_modes, this region is
