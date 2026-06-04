@@ -3,10 +3,22 @@
 //
 // File:        fpa_dataset.bt
 // Author:      MQB-coding
-// Revision:    9999
+// Revision:    10000
 // Purpose:     VAG MQB FPA (fahrprofilauswahl / driving profile) dataset parsing
 // Comments:    red = unknown, yellow = possible, green = sure, gray = doesn't look very relevant.
 //              Currently only useful for FPA datasets for 3Q0907530Q and newer.
+//
+// Changes vs r9999:
+//   - control_is_allowed_to_change (0x296) bit-field relabeled. New mapping:
+//       u16 bit N = FPA profile-id (N + 1). Old labels were off-by-one for
+//       decls 0..9 (high byte + first two low-byte fields).
+//   - control_is_reset (0x2D2) bit-field: decl 8 renamed from "ecoplus" to
+//       "id7_individual" (rest already matched u16 bit N = profile-id N).
+//   - hybrid_modes (0xD0C) annotated with getHybridModeName + slot-indexed
+//       semantics note (NOT 1:1 with FPA_profile[12]).
+//   - AID_mode_banner (0xE9D) annotated as slot-indexed (paired with hybrid_modes).
+//   - getControlName extended with IDs 58..81 (mk8 / newer firmwares).
+//   - getHybridModeName helper added (CharismaOperationMode mapping).
 //--------------------------------------
 OutputPaneClear();
 local int groupsMatrixControlsArray[64];
@@ -148,48 +160,91 @@ ubyte reserved_for_future_use_2[80] <bgcolor=cDkGray, hidden=true>; // always ze
 
 ushort function_bytes_settings_shifted_by_1_bit[30] <hidden=true>; // name isn't accurate, but this value is only used for print
 FSeek(662);
+// control_is_allowed_to_change (0x296) — 16-bit per control, big-endian.
+//
+// Empirically verified bit-mapping (cross-checked against JD00, KV00, OZ00,
+// P300, TE00, J400, LP04, LPH1 + Java ASLCarFPA ordinal table):
+//
+//     u16 bit N = FPA profile-id (N + 1)
+//
+// So bit 0 = id 1 = Comfort, bit 6 = id 7 = Individual (NOT "Eco plus" as the
+// older comments claimed — JD00 has no Eco+ profile yet sets bit 6 widely),
+// bit 7 = id 8 = Range (J400 confirms — it's the only basic-tier dataset with
+// FPA id 8 and matching bit 7), … bit 14 = id 15 = EV Off, bit 15 = id 16 =
+// Second Hold / Torque Vectoring. There is NO "notset / Profile 0" slot in
+// this field — every bit represents a real profile.
+//
+// 010 Editor's default for BigEndian is BitfieldLeftToRight: first-declared
+// field becomes the MSB of the first stored byte. With BE the first stored
+// byte is the HIGH byte of the u16. So:
+//   decl 0 -> u16 bit 15 -> id 16
+//   decl 7 -> u16 bit  8 -> id  9
+//   decl 8 -> u16 bit  7 -> id  8
+//   decl 15-> u16 bit  0 -> id  1
+// The labels below are renamed accordingly. Old labels (evoff/hybridarea/...)
+// were off-by-one for the high byte (they assumed remember-style encoding).
 struct {
-    ubyte allowed_to_change_in_evoff: 1             <read = getYesNo>;
-    ubyte allowed_to_change_in_hybridarea: 1        <read = getYesNo>;
-    ubyte allowed_to_change_in_hybridcharge: 1      <read = getYesNo>;
-    ubyte allowed_to_change_in_hybridhold: 1        <read = getYesNo>;
-    ubyte allowed_to_change_in_offroadindividual: 1 <read = getYesNo>;
-    ubyte allowed_to_change_in_snow: 1              <read = getYesNo>;
-    ubyte allowed_to_change_in_lift: 1              <read = getYesNo>;
-    ubyte allowed_to_change_in_clubsport: 1         <read = getYesNo>;
+    // HIGH byte → u16 bits 15..8 → profile-ids 16..9
+    ubyte allowed_to_change_in_id16_second_hold:        1 <read = getYesNo>; // u16 bit 15
+    ubyte allowed_to_change_in_id15_ev_off:             1 <read = getYesNo>; // u16 bit 14
+    ubyte allowed_to_change_in_id14_hybrid_area:        1 <read = getYesNo>; // u16 bit 13
+    ubyte allowed_to_change_in_id13_hybrid_charge:      1 <read = getYesNo>; // u16 bit 12
+    ubyte allowed_to_change_in_id12_hybrid_hold:        1 <read = getYesNo>; // u16 bit 11
+    ubyte allowed_to_change_in_id11_offroad_individual: 1 <read = getYesNo>; // u16 bit 10
+    ubyte allowed_to_change_in_id10_snow:               1 <read = getYesNo>; // u16 bit  9
+    ubyte allowed_to_change_in_id9_lift_phev2:          1 <read = getYesNo>; // u16 bit  8
 
-    ubyte allowed_to_change_in_notset: 1            <read = getYesNo>;
-    ubyte allowed_to_change_in_ecoplus: 1           <read = getYesNo>;
-    ubyte allowed_to_change_in_race: 1              <read = getYesNo>;
-    ubyte allowed_to_change_in_eco: 1               <read = getYesNo>;       
-    ubyte allowed_to_change_in_offroad: 1           <read = getYesNo>;
-    ubyte allowed_to_change_in_sport: 1             <read = getYesNo>;
-    ubyte allowed_to_change_in_normal: 1            <read = getYesNo>;
-    ubyte allowed_to_change_in_comfort: 1           <read = getYesNo>;
-    } control_is_allowed_to_change[30]               <bgcolor=cGreen,optimize=true>; 
+    // LOW byte → u16 bits 7..0 → profile-ids 8..1
+    ubyte allowed_to_change_in_id8_range_phev1:         1 <read = getYesNo>; // u16 bit  7
+    ubyte allowed_to_change_in_id7_individual:          1 <read = getYesNo>; // u16 bit  6
+    ubyte allowed_to_change_in_id6_race:                1 <read = getYesNo>; // u16 bit  5
+    ubyte allowed_to_change_in_id5_eco:                 1 <read = getYesNo>; // u16 bit  4
+    ubyte allowed_to_change_in_id4_offroad:             1 <read = getYesNo>; // u16 bit  3
+    ubyte allowed_to_change_in_id3_sport:               1 <read = getYesNo>; // u16 bit  2
+    ubyte allowed_to_change_in_id2_normal:              1 <read = getYesNo>; // u16 bit  1
+    ubyte allowed_to_change_in_id1_comfort:             1 <read = getYesNo>; // u16 bit  0
+    } control_is_allowed_to_change[30]               <bgcolor=cGreen,optimize=true>;
 ushort function_bytes_settings[30] <comment=getFunctionByteSettingName,hidden=true>;// name isn't accurate, but this value is only used for print
 
 FSeek(722);
+// control_is_reset (0x2D2) — 16-bit per control, big-endian.
+//
+// Empirically verified bit-mapping (same datasets as the allow field above):
+//
+//     u16 bit N = FPA profile-id N   (no +1 shift)
+//
+// So bit 0 = id 0 = "Profile 0" / notset, bit 1 = id 1 = Comfort, bit 7 = id 7
+// = Individual (NOT "Eco plus" — JD00 DCC sets bits 1..3 = Comfort/Normal/
+// Sport, which is the common DCC remember pattern), bit 15 = id 15 = EV Off.
+// The 1-bit shift relative to the allow field comes from "notset" living at
+// the LOW-byte LSB in remember vs sitting between the byte boundaries (and
+// being meaningless) in allow.
+//
+// With BE + BitfieldLeftToRight: decl 0 -> u16 bit 15, decl 15 -> u16 bit 0.
+// Only decl 8 ("ecoplus") was misnamed — it actually represents id 7 =
+// Individual. Renamed below to match the empirical truth.
 struct {
-    ubyte remember_after_reset_in_evoff: 1             <read = getYesNo>;
-    ubyte remember_after_reset_in_hybridarea: 1        <read = getYesNo>;
-    ubyte remember_after_reset_in_hybridcharge: 1      <read = getYesNo>;
-    ubyte remember_after_reset_in_hybridhold: 1        <read = getYesNo>;
-    ubyte remember_after_reset_in_offroadindividual: 1 <read = getYesNo>;
-    ubyte remember_after_reset_in_snow: 1              <read = getYesNo>;
-    ubyte remember_after_reset_in_lift: 1              <read = getYesNo>;
-    ubyte remember_after_reset_in_clubsport: 1         <read = getYesNo>;
+    // HIGH byte → u16 bits 15..8 → profile-ids 15..8
+    ubyte remember_after_reset_in_id15_ev_off:             1 <read = getYesNo>; // u16 bit 15
+    ubyte remember_after_reset_in_id14_hybrid_area:        1 <read = getYesNo>; // u16 bit 14
+    ubyte remember_after_reset_in_id13_hybrid_charge:      1 <read = getYesNo>; // u16 bit 13
+    ubyte remember_after_reset_in_id12_hybrid_hold:        1 <read = getYesNo>; // u16 bit 12
+    ubyte remember_after_reset_in_id11_offroad_individual: 1 <read = getYesNo>; // u16 bit 11
+    ubyte remember_after_reset_in_id10_snow:               1 <read = getYesNo>; // u16 bit 10
+    ubyte remember_after_reset_in_id9_lift_phev2:          1 <read = getYesNo>; // u16 bit  9
+    ubyte remember_after_reset_in_id8_range_phev1:         1 <read = getYesNo>; // u16 bit  8
 
-    ubyte remember_after_reset_in_ecoplus: 1           <read = getYesNo>;
-    ubyte remember_after_reset_in_race: 1              <read = getYesNo>;
-    ubyte remember_after_reset_in_eco: 1               <read = getYesNo>;       
-    ubyte remember_after_reset_in_offroad: 1           <read = getYesNo>;
-    ubyte remember_after_reset_in_sport: 1             <read = getYesNo>;
-    ubyte remember_after_reset_in_normal: 1            <read = getYesNo>;
-    ubyte remember_after_reset_in_comfort: 1           <read = getYesNo>;
-    ubyte remember_after_reset_in_notset: 1            <read = getYesNo>;
+    // LOW byte → u16 bits 7..0 → profile-ids 7..0
+    ubyte remember_after_reset_in_id7_individual:          1 <read = getYesNo>; // u16 bit  7 (was "ecoplus")
+    ubyte remember_after_reset_in_id6_race:                1 <read = getYesNo>; // u16 bit  6
+    ubyte remember_after_reset_in_id5_eco:                 1 <read = getYesNo>; // u16 bit  5
+    ubyte remember_after_reset_in_id4_offroad:             1 <read = getYesNo>; // u16 bit  4
+    ubyte remember_after_reset_in_id3_sport:               1 <read = getYesNo>; // u16 bit  3
+    ubyte remember_after_reset_in_id2_normal:              1 <read = getYesNo>; // u16 bit  2
+    ubyte remember_after_reset_in_id1_comfort:             1 <read = getYesNo>; // u16 bit  1
+    ubyte remember_after_reset_in_id0_notset:              1 <read = getYesNo>; // u16 bit  0
 
-    }control_is_reset[30]               <bgcolor=cDkGreen,optimize=true>; 
+    }control_is_reset[30]               <bgcolor=cDkGreen,optimize=true>;
 
 byte restart_value[30] <format=hex, bgcolor=cGreen, name=getSettingName>;
 // this is the default value after restart  
@@ -665,8 +720,23 @@ struct{
     // 15	0	0	0	30	0	0	1	0	0   KV, N1, N8 (Audi datasets)
     // 31	0	0	0	62	0	0	1	0	0   MZ, O2, O3, O4, O5, ON, OO, OV, P2, P3, P4, PG, PJ, PK, PL, TE
 
-    ubyte hybrid_modes[12]<format=decimal,bgcolor=cYellow>; //not sure, needs testing
-    ubyte hybrid_modes_active[12]<bgcolor=cRed >; //not sure, needs testing
+    // hybrid_modes (0xD0C) — 12-slot LIST of CharismaOperationModes available
+    // to this dataset. Empirically the bytes are slot-indexed, NOT 1:1 with
+    // FPA_profile[12]. The active count fills slots 0..N-1; unused trailing
+    // slots are padded with 0xFF.
+    //
+    // Source: cross-checked against TE00, P300, P400, PG00, O200, MZ00, KV00,
+    // N100, plus mk8 PHEV (LP04, LP05, LPH1, 2031, 2059). Java DSi DTO
+    // CharismaOperationMode anchors the value semantics.
+    //
+    // NOTE: this region only carries meaningful data in mk7 (FileSize 4352)
+    // PHEV / Audi datasets. mk8 (4088) tooling ignores it even when stray
+    // bytes happen to look PHEV-shaped.
+    ubyte hybrid_modes[12]        <format=decimal,bgcolor=cYellow, comment=getHybridModeName>;
+    ubyte hybrid_modes_active[12] <bgcolor=cRed>;
+    // hybrid_modes_active companion byte. Semantics still under research —
+    // observed values: 0..4 mixed with stride-2 zeros (e.g. P300 [1,0,0,1,0,2,
+    // 0,3,0,4,0,2]). Preserve verbatim on save.
     
     ubyte PHEV_unknown_D24[192] <bgcolor=cDkRed >;
 
@@ -696,6 +766,10 @@ struct{
     ubyte PHEV_unknown_E4F[8] <bgcolor=cLtRed>; // 2 0 0 0 0 0 0 0  on MZ, 0 on all others
     ubyte PHEV_unknown_E56[64] <bgcolor=cRed>; // looks to be 8x8 bytes or so
     ubyte PHEV_unknown_E96[7] <bgcolor=cDkRed>; // on Hybrid cars: 138 37 1 34 0 174 0 
+    // AID_mode_banner (0xE9D) — AID banner per hybrid-mode SLOT (NOT per FPA
+    // profile slot). Index aligns with hybrid_modes[] above; profiles_aid_banner
+    // at 0x8C2 is the per-profile equivalent. Like hybrid_modes, this region is
+    // mk7-PHEV-only in practice.
     ubyte AID_mode_banner[12]<bgcolor=cGreen, comment=getAIDBanner>;
     ubyte PHEV_unknown_EA9[20] <bgcolor=cDkRed>; // on Hybrid cars: 138 37 1 34 0 174 0 
     ubyte PHEV_unknown_E4D[4] <bgcolor=cRed>;
@@ -872,7 +946,7 @@ Printf("\t\t\t\t Offrd/HHold────┐│││ ││││││││\n"
 Printf("\t\t\t\t Offrd/HCharge─┐││││ ││││││││\n") ;
 Printf("\t\t\t\t Offrd/HArea──┐│││││ ││││││││\n") ;
 Printf("\t\t\t\t EV OFF──────┐││││││ ││││││││\n") ;
-Printf("\t\t\t\t ?????──────┐│││││││ ││││││││\n") ;
+Printf("\t\t\t\t SecondHold─┐│││││││ ││││││││\n") ; // bit 15 = id 16 (Second Hold / Torque Vectoring)
 
 for( i = 0; i < 30; i++)
 {
@@ -883,7 +957,7 @@ for( i = 0; i < 30; i++)
 }
 
 printTitle("Remember setting in specific mode after restart of the car: (0x2D2) ");
-Printf("\t\t\t\t ?????──────────────────────┐\n") ;
+Printf("\t\t\t\t Profile 0/notset───────────┐\n") ; // bit 0 = id 0 (no profile)
 Printf("\t\t\t\t Comfort───────────────────┐│\n") ;
 Printf("\t\t\t\t Normal───────────────────┐││\n") ;
 Printf("\t\t\t\t Sport───────────────────┐│││\n") ;
@@ -1053,6 +1127,25 @@ string getSettingName(int settingNumber) {
     }
 }
 
+// helper function to get hybrid-mode (CharismaOperationMode) name
+// Values derived from Java DSi DTO `CharismaOperationMode` + observed datasets
+// (TE00, P300, P400, PG00, O200, MZ00, LP04, LP05, LPH1, 2031, 2059).
+string getHybridModeName(int mode) {
+    switch (mode) {
+        case 0:   return "Not set";
+        case 1:   return "EV Mode";
+        case 2:   return "Hybrid Auto";
+        case 3:   return "Battery Hold (Sustaining)";
+        case 4:   return "Battery Charge";
+        case 5:   return "SoC Control";
+        case 6:   return "Hybrid Sport / GTE";
+        case 55:  return "Unknown (55)";
+        case 57:  return "Unknown (57)";
+        case 255: return "Disabled (slot unused)";
+        default:  return "Unknown";
+    }
+}
+
 // helper function to get light mode name
 string getModeButtonLightState(int lightMode) {
     switch (lightMode) {
@@ -1130,6 +1223,32 @@ string getControlName(int i) {
         case 55: j = "Drivemode2"; break;              // 
         case 56: j = "Drivemode3"; break;              // 
         case 57: j = "Double clutch"; break;           //
+        // The following IDs were observed in newer / mk8 firmwares and matched
+        // up against Python app_fpa's dict_controls.
+        case 58: j = "Unknown 58"; break;              // possibly dynamic chassis
+        case 59: j = "Unknown 59"; break;
+        case 60: j = "Unknown 60"; break;
+        case 61: j = "Unknown 61"; break;
+        case 62: j = "Unknown 62"; break;
+        case 63: j = "Unknown 63"; break;
+        case 64: j = "Unknown 64"; break;
+        case 65: j = "Engine (variant)"; break;
+        case 66: j = "Unknown 66"; break;
+        case 67: j = "Unknown 67"; break;
+        case 68: j = "Unknown 68"; break;
+        case 69: j = "Unknown 69"; break;
+        case 70: j = "Range calculation"; break;
+        case 71: j = "Unknown 71"; break;
+        case 72: j = "Rear differential lock"; break;
+        case 73: j = "Hill Hold Control"; break;
+        case 74: j = "Park Distance Control"; break;
+        case 75: j = "Engine (variant)"; break;
+        case 76: j = "Freilauf default ON"; break;
+        case 77: j = "Unknown mk4 (possibly DCC)"; break;
+        case 78: j = "Electric Brake Power Amplifier?"; break;
+        case 79: j = "Unknown 79"; break;
+        case 80: j = "All-wheel drive?"; break;        // similar to 58
+        case 81: j = "Unknown 81"; break;              // observed in mk8 2038 (Golf 8 R)
         case 0xFF: j = "--"; break;                    // CharismaListFunctions.NONE
         
         default:   j = "-- Unknown"; break;
