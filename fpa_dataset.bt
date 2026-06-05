@@ -3,10 +3,70 @@
 //
 // File:        fpa_dataset.bt
 // Author:      MQB-coding
-// Revision:    10001
+// Revision:    10006
 // Purpose:     VAG MQB FPA (fahrprofilauswahl / driving profile) dataset parsing
 // Comments:    red = unknown, yellow = possible, green = sure, gray = doesn't look very relevant.
 //              Currently only useful for FPA datasets for 3Q0907530Q and newer.
+//
+// Changes vs r10005:
+//   - "Dataset specifics" Printf: now opens with a compact 12-slot profile
+//     summary table (slot/id/name/return/banner/LED) for quick at-a-glance scan,
+//     followed by the per-profile detailed setting blocks.
+//   - "HMI" Printf BUG FIX: titles previously called getSettingName(slot+1) which
+//     used the mode-id enum (Comfort/Normal/Sport...) and printed wrong per-slot
+//     headers. Replaced with getFPAName(FPA_profile[slot]) — the actual profile
+//     name from that slot. Also skips empty slots and added a header row.
+//   - "Research" Printf split into two clearly-titled subsections:
+//     unknown_setting_8DA + per-control variant flags (SettingBytes_again/_more).
+//   - SettingBytes_again[30] and SettingBytes_more[30] declarations now have
+//     header comments documenting the empirical clusters we discovered
+//     (legacy names kept for backward compat; semantics now spelled out).
+//   - unknown_value_32C, profile_0_nodata get clarifying header comments.
+//   - Removed duplicate ushort parses of allow/remember regions
+//     (`function_bytes_settings_shifted_by_1_bit` + `function_bytes_settings`).
+//     Printf now reads the BE u16 directly via ReadUByte()<<8|ReadUByte().
+//   - New "PHEV region map" Printf section before Checksum: one-line overview of
+//     every annotated PHEV-region byte range with name, hypothesis label, and
+//     confidence level. Compact research overview.
+//
+// Changes vs r10004:
+//   - "Request values (0x8FB)" and "Sub-control request-value overrides (0x26)"
+//     Printf sections merged into one combined "Request values + sub-control
+//     overrides" table. Each main control row is followed by indented sub-control
+//     rows (prefixed `>`) for grouped controls — mirrors how the Python app_fpa
+//     UI renders the nested layout. Sub rows leave column 0 blank (no override
+//     for mode-id 0). Single header + legend at top, no separate title block.
+//
+// Changes vs r10003:
+//   - "Allowed to change in specific mode (0x296)" + "Remember setting after
+//     car restart (0x2D2)" Printf sections rewritten. Old version used ASCII
+//     "┐│" arrow art over 16 column header lines that misaligned with the
+//     IntToBinaryStr-rendered body, was nearly unreadable. New version uses a
+//     fixed-width column-per-bit grid (X/.) with a bit-to-profile legend at
+//     top, mirrors how the Python app_fpa renders the checkbox grid. New
+//     helper `printBitmaskRow()` shared between both sections.
+//
+// Changes vs r10002:
+//   - "Request values (0x8FB)" Printf rewritten. Old version used
+//     `request_values_0..7` paired-column headers that misaligned with the
+//     16-column body and included confusing labels ("00 cmft(1) nrml(2) ...").
+//     New version: clean fixed-width columns (3-char per mode-id), proper
+//     header row separator, mode-id legend at top, one row per active
+//     control with the 16 nibble values inline.
+//
+// Changes vs r10001:
+//   - groupMemberMatrixPosition() rewritten: now uses "count earlier positions
+//     belonging to the SAME group" algorithm (mirrors Python app_fpa parser).
+//     Previous "max-group-seen" tracking only worked for monotone group layouts
+//     and broke on non-monotone layouts like LPM0 [1,1,1,4,4,3,2,2,5,6,6].
+//     The hack `if (group==4) group=3;` is removed.
+//   - Setting-Groups Printf callsite now uses group_member_request_values_controls[g-1]
+//     (the authoritative group-header field @0x206), not list_of_grouped_controls[g-?]
+//     with a special case for group 4.
+//   - "Sub-control request-value overrides" Printf section: re-enabled (was
+//     commented out) and rewritten to iterate per-sub-control rather than per
+//     physical matrix row. Mirrors Python app_fpa's child_entries rendering —
+//     prints sub-control name + 15 profile values per row, much more readable.
 //
 // Changes vs r10000:
 //   - Annotated several PHEV-region unknowns with hypothesised semantics derived
@@ -165,7 +225,10 @@ ubyte reserved_for_future_use_2[80] <bgcolor=cDkGray, hidden=true>; // always ze
 
 
 
-ushort function_bytes_settings_shifted_by_1_bit[30] <hidden=true>; // name isn't accurate, but this value is only used for print
+// (Removed in r10006: previously declared a parallel `ushort
+// function_bytes_settings_shifted_by_1_bit[30]` over the same bytes the
+// allow-bitfield struct consumes, just to give Printf an easy ushort handle.
+// Printf now uses ReadUShort(0x296 + i*2) directly — no second parse needed.)
 FSeek(662);
 // control_is_allowed_to_change (0x296) — 16-bit per control, big-endian.
 //
@@ -211,8 +274,8 @@ struct {
     ubyte allowed_to_change_in_id2_normal:              1 <read = getYesNo>; // u16 bit  1
     ubyte allowed_to_change_in_id1_comfort:             1 <read = getYesNo>; // u16 bit  0
     } control_is_allowed_to_change[30]               <bgcolor=cGreen,optimize=true>;
-ushort function_bytes_settings[30] <comment=getFunctionByteSettingName,hidden=true>;// name isn't accurate, but this value is only used for print
-
+// (Removed in r10006: same dedup as the allow side — the parallel ushort
+// declaration over the remember bytes is gone. Printf uses ReadUShort(0x2D2 + i*2).)
 FSeek(722);
 // control_is_reset (0x2D2) — 16-bit per control, big-endian.
 //
@@ -256,14 +319,15 @@ struct {
 byte restart_value[30] <format=hex, bgcolor=cGreen, name=getSettingName>;
 // this is the default value after restart  
 
+// unknown_value_32C @ 0x32C — single byte. Empirically always 0 across all 99
+// example datasets. .bt author tested non-zero values: no observable effect.
+// Treated as reserved zero-padding.
 byte unknown_value_32C <bgcolor=cDkGray,hidden=true>;
-// tested different values, doesn't seem to do anything
-// seems to be 0 always
 
 
 // enabled profiles start here
 ubyte FPA_profile[12] <format=hex,bgcolor=cGreen,name=getFPAName>;
-// changing this will changes what button is shown in the FPA selection screen.
+// changing this will change what button is shown in the FPA selection screen.
 // these bytes determine what profile button is used in what position
 // for instance:
 // Put "04" into profile_1, and it will display as Offroad.
@@ -293,8 +357,10 @@ struct{
 } allow_return_to_profile <optimize=false, bgcolor=cGreen>;
 // this determines whether or not it's allowed to return to a given profile upon reset.
 
+// profile_0_nodata[30] @ 0x347 — 30 bytes that look like they should hold
+// "profile 0" (notset) per-control settings, but empirically always 0.
+// .bt author tested non-zero values: no observable effect. Likely reserved.
 byte profile_0_nodata[30] <bgcolor=cDkGray, hidden=true>;
-// tested with different values here, doesn't seem to do anything
 
 
 struct{
@@ -438,7 +504,7 @@ struct {
     // 66   PF
     
     
-    ubyte unknown_button_data_806_screen_behavior[4]<bgcolor=cRed>;    
+    ubyte unknown_button_data_806_screen_behavior[5]<bgcolor=cRed>;    
     // known (dec) values:
     // 0
     // 1
@@ -461,21 +527,20 @@ struct {
     
     
     
-    ubyte unknown_button_data_80A[4]<bgcolor=cDkRed>;
-    // 1st byte always 0
+    ubyte unknown_button_data_80A[3]<bgcolor=cDkRed>;
     // known (dec) values:
-    // 2nd byte:
+    // 1st byte:
     // 0
     // 3
     // 11
     //
-    // 3rd byte:
+    // 2nd byte:
     // 1
     // 5
     // 6
     // 12
     //
-    // 4th byte:
+    // 3rd byte:
     // 1
     // 2
     // 3
@@ -634,10 +699,25 @@ byte gw_longcoding_controls_with_links[30]<bgcolor=cGreen, name=getLongCodingByt
 byte gw_longcoding_controls_without_links[30]<bgcolor=cDkGreen, name=getLongCodingByteName>;
 // Same list as previous one, but can be used to link one control to another.  Is used with Sailing and 4x4 features.
 
-byte SettingBytes_again[30] <bgcolor=cRed>; // rhymes with earlier setting bytes?
-// known values: 2 and 3. Changes didn't seem to touch the 0x38 table logic
-byte SettingBytes_more[30] <bgcolor=cDkRed>; // rhymes with earlier setting bytes?
-// known values: 0 and 8. Changes didn't seem to touch the 0x38 table logic
+// SettingBytes_again[30] @ 0xA67 — legacy name (kept for backward compat with
+// older .bt versions). Semantically: per-control platform/variant flag,
+// possible meaning "control category" (value 2 vs 3).
+// Empirical clusters (see Research-stuff Printf for full mapping):
+//   3 — most controls on standard FPA datasets (~85%)
+//   2 — powertrain controls (Engine/StartStop/Gearbox) on some datasets
+//   2 — ALL active controls on Leon FR/Cupra series (combined with _more=8)
+//   0 — only when slot is unused (control_id == 0)
+// .bt author tested values experimentally: no observable HMI/ECU behaviour
+// change, so likely a vestigial field consumed only by old firmware.
+byte SettingBytes_again[30] <bgcolor=cRed>;
+// SettingBytes_more[30] @ 0xA85 — legacy name. Companion to SettingBytes_again
+// (same per-control variant-flag role).
+// Empirical clusters:
+//   0 — almost all controls on every dataset
+//   8 — set for active controls in Leon FR/Cupra series (LA/LE/LG/LI/LK/LO)
+//       and (rarely) in Tiguan PHEV — coincides with feature_flags @ 0x8C0 = 0
+//       (pre/no-FPA platform marker).
+byte SettingBytes_more[30] <bgcolor=cDkRed>;
 
 // the following data all seems to be related to PHEV.
 struct{
@@ -894,60 +974,89 @@ ubyte button_for_test[32];
 
 printTitle("Dataset specifics");
 
-Printf(" Version: %s", dataset_version);
-Printf(" \n"); 
- 
-
+Printf(" Version: %s\n", dataset_version);
+Printf(" Model year: %i\n", header1.year + 2010);
+Printf(" File size: %i bytes (%s)\n",
+    FileSize(),
+    (FileSize() == 0x1100) ? "mk7 — Golf 7 / Leon mk3" : "mk8 — Golf 8 / Leon mk4");
+Printf("\n");
 
 local int i = 0;
 local int j = 0;
-
 local int profile_number = 0;
 local int setting_number = 0;
 local string settingText;
 
-while( profile_number < 12 )
+// --- Summary table: all 12 profile slots at a glance ---
+Printf(" Profile slot summary:\n");
+Printf("  Slot  FPA-id  Profile name           Returns to              AID banner                Mode LED\n");
+Printf("  ----  ------  ---------------------  ----------------------  ------------------------  ------------\n");
+for (profile_number = 0; profile_number < 12; profile_number++) {
+    if (FPA_profile[profile_number] != 0) {
+        Printf("   %2i    0x%02x   %-21s  %-22s  %-24s  %s\n",
+            profile_number,
+            FPA_profile[profile_number],
+            getFPAName(FPA_profile[profile_number]),
+            getFPAName(profile_returns_after_restart[profile_number]),
+            getAIDBanner(AID_profile_banner[profile_number]),
+            getModeButtonLightState(mode_light_on[profile_number]));
+    } else {
+        Printf("   %2i    ----   (slot unused)\n", profile_number);
+    }
+}
+Printf("\n");
 
-{
-        if (FPA_profile[profile_number] != 00) {
-        Printf (" Profile position %i: %s(%x) \n", profile_number, getFPAName(FPA_profile[profile_number]),FPA_profile[profile_number] );
-        Printf ("  Returns to %s after restart\n", getFPAName(profile_returns_after_restart[profile_number]) );
-        Printf ("  Banner on AID: %s \n", getAIDBanner(AID_profile_banner[profile_number]) );
-        Printf ("  Mode button LED: %s \n", getModeButtonLightState(mode_light_on[profile_number]));
-        Printf ("  Settings: \n");
-
-          for( setting_number = 0; setting_number < 30; setting_number++)
-        {
+// --- Detailed per-profile settings ---
+Printf(" Per-profile control settings (only non-zero shown):\n\n");
+profile_number = 0;
+while (profile_number < 12) {
+    if (FPA_profile[profile_number] != 0) {
+        Printf(" Profile slot %i — %s (0x%02x):\n",
+            profile_number,
+            getFPAName(FPA_profile[profile_number]),
+            FPA_profile[profile_number]);
+        for (setting_number = 0; setting_number < 30; setting_number++) {
             settingText = getSettingName(profile[profile_number].setting_byte[setting_number]);
-            if (settingText!="not set"){
-                Printf ("\t%i\t%-30s: %s (%x) \n", setting_number, getControlName(list_of_grouped_controls[setting_number]),getSettingName(profile[profile_number].setting_byte[setting_number]),profile[profile_number].setting_byte[setting_number]);
+            if (settingText != "not set") {
+                Printf("   %2i  %-30s  %s (0x%x)\n",
+                    setting_number,
+                    getControlName(list_of_grouped_controls[setting_number]),
+                    settingText,
+                    profile[profile_number].setting_byte[setting_number]);
             }
         }
- }
+        Printf("\n");
+    }
     profile_number += 1;
-    Printf("\n");
 }
 
 local int indiv_profile_number = 0;
 local int indiv_setting_number = 0;
 
-printTitle("HMI");
-Printf(" The following settings are shown in the HMI.\n Items that have no settings are hidden.\n\n");
-while( indiv_profile_number < 12 )
-    {
-        {
-             Printf (" %s HMI shows the following settings: \n", getSettingName(indiv_profile_number+1) );
-             Printf (" Position  Control                         setting: \n");
-
-              for( indiv_setting_number = 0; indiv_setting_number < 30; indiv_setting_number++)
-            {
-                if (list_of_grouped_controls[indiv_setting_number] > 0){
-                    Printf ("  %i \t %-30s: %s(%04x) \n", indiv_setting_number, getControlName( list_of_grouped_controls[indiv_setting_number]),getIndividualSettingName(settings_shown_in_HMI[indiv_profile_number].individual_setting_byte[indiv_setting_number]),(settings_shown_in_HMI[indiv_profile_number].individual_setting_byte[indiv_setting_number]));
-               }
+printTitle("HMI — settings shown per profile");
+Printf(" Items whose individual_setting_byte is 0 are hidden in the HMI.\n");
+Printf(" Per profile we list the active controls + their selectable mode bits.\n\n");
+while (indiv_profile_number < 12) {
+    if (FPA_profile[indiv_profile_number] != 0) {
+        // FIXED in r10006: was getSettingName(indiv_profile_number+1), which
+        // used the mode-id enum and printed wrong titles. Real per-slot title
+        // = FPA profile name from FPA_profile[slot].
+        Printf(" Profile slot %i (%s): HMI shows the following settings:\n",
+            indiv_profile_number,
+            getFPAName(FPA_profile[indiv_profile_number]));
+        Printf("  Pos  Control                         Selectable modes (bitmask)\n");
+        for (indiv_setting_number = 0; indiv_setting_number < 30; indiv_setting_number++) {
+            if (list_of_grouped_controls[indiv_setting_number] > 0) {
+                Printf("   %2i  %-30s %s (0x%04x)\n",
+                    indiv_setting_number,
+                    getControlName(list_of_grouped_controls[indiv_setting_number]),
+                    getIndividualSettingName(settings_shown_in_HMI[indiv_profile_number].individual_setting_byte[indiv_setting_number]),
+                    settings_shown_in_HMI[indiv_profile_number].individual_setting_byte[indiv_setting_number]);
             }
+        }
+        Printf("\n");
     }
     indiv_profile_number += 1;
-    Printf("\n");
 }
 
 
@@ -979,14 +1088,20 @@ while (indivgroup_setting_number < 30) {
 
     while (group_number < 30) {
         if (grouped_controls[indivgroup_setting_number] == group_number) {
-            //The following statement is to fix a bug where the name of the group 4 needs the control that's in position 3.
-            if (group_number == 4){ 
-            Printf("    Group %i (%s): %s (%02x) - 0x38 Matrix line: %i\n", group_number, getControlName(list_of_grouped_controls[group_number-2]), getControlName(list_of_controls[indivgroup_setting_number]),list_of_controls[indivgroup_setting_number], groupMemberMatrixPosition(indivgroup_setting_number,group_number));
-            }else{            
-            Printf("    Group %i (%s): %s (%02x) - 0x38 Matrix line: %i\n", group_number, getControlName(list_of_grouped_controls[group_number-1]), getControlName(list_of_controls[indivgroup_setting_number]),list_of_controls[indivgroup_setting_number], groupMemberMatrixPosition(indivgroup_setting_number,group_number));
-            }
+            // Group-header = authoritative group_member_request_values_controls[g-1]
+            // at offset 0x206, NOT list_of_grouped_controls[g-1] (which is a
+            // separate per-display-slot ordering). Previous hack of using
+            // [g-2] only for group 4 worked on a couple of datasets but was
+            // wrong in general — non-monotone layouts (LPM0 etc.) need the
+            // header-ID directly from the dedicated 8-slot field.
+            Printf("    Group %i (%s): %s (%02x) - 0x38 Matrix line: %i\n",
+                group_number,
+                getControlName(group_member_request_values_controls[group_number-1]),
+                getControlName(list_of_controls[indivgroup_setting_number]),
+                list_of_controls[indivgroup_setting_number],
+                groupMemberMatrixPosition(indivgroup_setting_number, group_number));
             num_of_groups++;
-                  }
+        }
         group_number++;
     }
     indivgroup_setting_number++;
@@ -997,165 +1112,227 @@ Printf(" No groups configured at 0xA09 range.\n");
 
 
 //----
-printTitle("Allowed to make changes to a specific mode for a specific setting (0x296)");
-Printf("\t\t\t\t Comfort────────────────────┐\n") ;
-Printf("\t\t\t\t Normal────────────────────┐│\n") ;
-Printf("\t\t\t\t Sport────────────────────┐││\n") ;
-Printf("\t\t\t\t Offroad─────────────────┐│││\n") ;
-Printf("\t\t\t\t Eco────────────────────┐││││\n") ;
-Printf("\t\t\t\t Race──────────────────┐│││││\n") ;
-Printf("\t\t\t\t Individual───────────┐││││││\n") ;
-Printf("\t\t\t\t Range───────────────┐│││││││\n") ;
-Printf("\t\t\t\t                     ││││││││\n") ;
-Printf("\t\t\t\t Lift──────────────┐ ││││││││\n") ;
-Printf("\t\t\t\t Offroad Snow─────┐│ ││││││││\n") ;
-Printf("\t\t\t\t Offroad Indiv.──┐││ ││││││││\n") ;
-Printf("\t\t\t\t Offrd/HHold────┐│││ ││││││││\n") ;
-Printf("\t\t\t\t Offrd/HCharge─┐││││ ││││││││\n") ;
-Printf("\t\t\t\t Offrd/HArea──┐│││││ ││││││││\n") ;
-Printf("\t\t\t\t EV OFF──────┐││││││ ││││││││\n") ;
-Printf("\t\t\t\t SecondHold─┐│││││││ ││││││││\n") ; // bit 15 = id 16 (Second Hold / Torque Vectoring)
-
-for( i = 0; i < 30; i++)
-{
-
-    if (list_of_controls[i] > 0){
-        Printf ("  %i: \t%-30s \t %02x \t %s \t %02x\n", i, getControlName(list_of_controls[i]), list_of_controls[i], IntToBinaryStr(function_bytes_settings_shifted_by_1_bit[i],2,true),function_bytes_settings_shifted_by_1_bit[i]);
-   }
+printTitle("Allowed to change in specific mode (0x296)");
+// 16-bit per control. Bit N = FPA profile-id (N+1). bit 0 = Comfort.
+// Empirically verified against JD00/KV00/OZ00/J400/LP04 + Java
+// FPACharismaProfileFunctionAvailability ordinal table.
+Printf("\n");
+Printf(" Bit-to-profile mapping: bit N = FPA profile-id (N+1)\n");
+Printf("   0=Comfort   1=Normal     2=Sport    3=Offroad   4=Eco      5=Race\n");
+Printf("   6=Individ.  7=Range/Pv1  8=Lift/Pv2 9=Snow     10=OffrInd 11=HybHold\n");
+Printf("  12=HybCharg 13=HybArea   14=EV-Off  15=SecondHold (Torque Vectoring)\n");
+Printf("\n");
+Printf(" Pos  Control                        ID   |  0  1  2  3  4  5  6  7  8  9 10 11 12 13 14 15  | mask\n");
+Printf(" ---  -----------------------------  ---  | -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- --  | ------\n");
+for (i = 0; i < 30; i++) {
+    if (list_of_controls[i] > 0) {
+        // Read as BE uint16 (the field is stored big-endian, but by this point
+        // the script has switched to LittleEndian for the CRC; byte-shift the
+        // two bytes manually so we don't depend on the current endianness).
+        printBitmaskRow(i, list_of_controls[i],
+            (ReadUByte(0x296 + i*2) << 8) | ReadUByte(0x296 + i*2 + 1));
+    }
 }
 
-printTitle("Remember setting in specific mode after restart of the car: (0x2D2) ");
-Printf("\t\t\t\t Profile 0/notset───────────┐\n") ; // bit 0 = id 0 (no profile)
-Printf("\t\t\t\t Comfort───────────────────┐│\n") ;
-Printf("\t\t\t\t Normal───────────────────┐││\n") ;
-Printf("\t\t\t\t Sport───────────────────┐│││\n") ;
-Printf("\t\t\t\t Offroad────────────────┐││││\n") ;
-Printf("\t\t\t\t Eco───────────────────┐│││││\n") ;
-Printf("\t\t\t\t Race─────────────────┐││││││\n") ;
-Printf("\t\t\t\t Individual──────────┐│││││││\n") ;
-Printf("\t\t\t\t                     ││││││││\n") ;
-Printf("\t\t\t\t Range─────────────┐ ││││││││\n") ;
-Printf("\t\t\t\t Lift─────────────┐│ ││││││││\n") ;
-Printf("\t\t\t\t Offroad Snow────┐││ ││││││││\n") ;
-Printf("\t\t\t\t Offroad Indiv.─┐│││ ││││││││\n") ;
-Printf("\t\t\t\t Offrd/HHold───┐││││ ││││││││\n") ;
-Printf("\t\t\t\t Offrd/HCharge┐│││││ ││││││││\n") ;
-Printf("\t\t\t\t Offrd/HArea─┐││││││ ││││││││\n") ;
-Printf("\t\t\t\t EV OFF─────┐│││││││ ││││││││\n") ;
-for( i = 0; i < 30; i++)
-{
-
-    if (list_of_controls[i] > 0){
-        Printf ("  %i: \t%-30s \t %02x \t %s \t %02x\n", i, getControlName(list_of_controls[i]), list_of_controls[i], IntToBinaryStr(function_bytes_settings[i],2,true), function_bytes_settings[i]);
-   }
+printTitle("Remember setting after car restart (0x2D2)");
+// 16-bit per control. Bit N = FPA profile-id N. bit 0 = Profile 0/notset,
+// bit 1 = Comfort. Empirically same datasets as Allow above.
+Printf("\n");
+Printf(" Bit-to-profile mapping: bit N = FPA profile-id N\n");
+Printf("   0=Profile 0 1=Comfort    2=Normal   3=Sport    4=Offroad  5=Eco\n");
+Printf("   6=Race      7=Individ.   8=Range/P1 9=Lift/P2 10=Snow    11=OffrInd\n");
+Printf("  12=HybHold  13=HybCharg  14=HybArea 15=EV-Off\n");
+Printf("\n");
+Printf(" Pos  Control                        ID   |  0  1  2  3  4  5  6  7  8  9 10 11 12 13 14 15  | mask\n");
+Printf(" ---  -----------------------------  ---  | -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- --  | ------\n");
+for (i = 0; i < 30; i++) {
+    if (list_of_controls[i] > 0) {
+        printBitmaskRow(i, list_of_controls[i],
+            (ReadUByte(0x2D2 + i*2) << 8) | ReadUByte(0x2D2 + i*2 + 1));
+    }
 }
 
-printTitle("Request values (0x8FB)");
+printTitle("Request values + sub-control overrides (0x8FB + 0x26)");
+// Combined table — one row per main control (from list_of_grouped_controls,
+// 30 slots), with indented sub-control rows beneath each main row whenever
+// the main control is the header of a multi-control group.
+//
+// MAIN row data (0x8FB, request_values):
+//   Per main control, the byte sent to the control's ECU when each FPA mode-id
+//   0..15 is active. 16 mode-IDs × 30 controls, packed as nibbles (240 bytes).
+//   Layout: request_values[j].request_value[i].value_A = mode 2j,
+//           request_values[j].request_value[i].value_B = mode 2j+1.
+//
+// SUB rows data (0x26, group_children_request_values):
+//   Per grouped sub-control, 15 profile-override values that REPLACE the
+//   main control's request value in profiles 1..15. Physical layout: 32 rows
+//   × 15 bytes (nibble-packed); the matrix-line index is computed from the
+//   sub-control's position-within-group via groupMemberMatrixPosition().
+//   Sub-rows have NO column-0 value (mode 0 = NotSet has no override).
+//
+// Sub-control linkage: for each main control C in list_of_grouped_controls,
+// find which group g has C as its header (via group_member_request_values_controls
+// at 0x206), then list every position p where grouped_controls[p] == g.
+Printf("\n");
+Printf(" Mode-id reference:  0=NotSet 1=Comfort 2=Normal 3=Sport 4=Offroad 5=Eco\n");
+Printf("                     6=Race 7=Eco+/Individual 8=On 9=Off 10=Snow\n");
+Printf("                     11=? 12=? 13=Sand 14=? 15=?\n");
+Printf(" Sub-control rows are indented and prefixed with `>`. Their column-0 is\n");
+Printf(" left blank because the 0x26 override block has no value for mode 0.\n");
+Printf("\n");
+Printf(" Pos  Control                          ID   |  0  1  2  3  4  5  6  7  8  9 10 11 12 13 14 15\n");
+Printf(" ---  -------------------------------  ---  | -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- --\n");
 
-// Prints a table of all requests values that are sent to control modules.
-Printf(" \n");
-Printf(" Control-module request values (8FB range)\n");
-Printf ("\t\t\t\t\trequest_values_0\t|request_values_1\t|request_values_2\t|request_values_3\t|request_values_4\t|request_values_5\t|request_values_6\t|request_values_7\n");
-Printf(" Position\tControl\t\t\t\t00\tcmft(1)\tnrml(2)\tsprt(3)\tofrd(4)\teco(5)\trace(6)\teco+(7)\ton(8)\toff(9)\tsnow(10)\tpure(11)\t12\tsand(13)\t14\t15\n");
-for( i = 0; i < 30; i++)
-{
-    if (list_of_grouped_controls[i] > 0){
-        Printf ("  %i:\t %-30s(%02x)", i, getControlName(list_of_grouped_controls[i]),list_of_grouped_controls[i]);
-        j = 0;
-        while (j < 8){ 
-        Printf ("\t%02i\t%02i", request_values[j].request_value[i].request_value_A, request_values[j].request_value[i].request_value_B) ;
-        j++;
+local int rv_count = 0;
+local int rv_i;
+local int rv_j;
+local int rv_a;
+local int rv_b;
+local int rv_main_id;
+local int rv_group;
+local int rv_g;
+local int rv_sub;
+local int rv_sub_ml;
+local int rv_sub_row;
+local int rv_sub_high;
+local int rv_sub_col;
+local int rv_sub_nib;
+for (rv_i = 0; rv_i < 30; rv_i++) {
+    rv_main_id = list_of_grouped_controls[rv_i];
+    if (rv_main_id > 0) {
+        // MAIN row — 16 mode nibbles
+        Printf("  %2d  %-31s  %3d  |",
+            rv_i,
+            getControlName(rv_main_id),
+            rv_main_id);
+        for (rv_j = 0; rv_j < 8; rv_j++) {
+            rv_a = request_values[rv_j].request_value[rv_i].request_value_A;
+            rv_b = request_values[rv_j].request_value[rv_i].request_value_B;
+            Printf(" %2d %2d", rv_a, rv_b);
         }
         Printf("\n");
-   }
-}
-printTitle("Research stuff");
+        rv_count++;
 
-/*
-//--- research stuff, what looks like a table from position 38:
-Printf("\n Unknown 38x research\n");
-i = 0;
-j = 0;
-local int amount_of_unknown38_rows_with_value = 0;
-local int amount_of_unknown38_values = 0;
-local int amount_of_unknown38_values_A = 0;
-local int amount_of_unknown38_values_B = 0;
-
-
-local string even_lines;
-local string uneven_lines;
-local int line_number =0;
-
-        Printf("\n");
-
-Printf(" Position\tControl\t\t\t\t1\t2\t3\t4\t5\t6\t7\t8\t9\t10\t11\t12\t13\t14\t15\n");
-i = 0;
-j = 0;
-local int k = 0;
-line_number =0;
-local string filled_lines = "";
-local string used_controls = "";
-for( i = 0; i < 32; i++)
-{
-        amount_of_unknown38_values_A=0;
-        amount_of_unknown38_values_B=0;
-
-        for( j = 0; j < 15; j++){
-        if (group_children_request_values[i].group_children_request_values_x[j].value_A!=0){
-            amount_of_unknown38_values_A++;
-        }
-        if (group_children_request_values[i].group_children_request_values_x[j].value_B!=0){
-            amount_of_unknown38_values_B++;
+        // Find which group g (1..8) has this main control as its header.
+        rv_group = 0;
+        for (rv_g = 1; rv_g <= 8; rv_g++) {
+            if (group_member_request_values_controls[rv_g - 1] == rv_main_id) {
+                rv_group = rv_g;
+                break;
             }
         }
-
-        if (amount_of_unknown38_values_A > 0){
-                amount_of_unknown38_rows_with_value++;
-                Printf("  %i:\t %-30s (%02x)\t", line_number, getControlName(list_of_controls[groupsMatrixControlsArray[line_number]]),list_of_controls[groupsMatrixControlsArray[line_number]]);
-                filled_lines = filled_lines + Str("%i,",line_number);
-                for( j = 0; j < 15; j++)
-                {
-                    Printf("%01x\t", group_children_request_values[i].group_children_request_values_x[j].value_A);
+        if (rv_group > 0) {
+            // SUB rows — one per position whose grouped_controls == rv_group
+            for (rv_sub = 0; rv_sub < 30; rv_sub++) {
+                if (grouped_controls[rv_sub] == rv_group) {
+                    rv_sub_ml = groupMemberMatrixPosition(rv_sub, rv_group);
+                    if (rv_sub_ml < 0 || rv_sub_ml >= 64) continue;
+                    rv_sub_row = rv_sub_ml / 2;
+                    rv_sub_high = rv_sub_ml % 2;
+                    // Indent + arrow marker; sub control id from list_of_controls
+                    Printf("    > %-31s  %3d  |   ",
+                        getControlName(list_of_controls[rv_sub]),
+                        list_of_controls[rv_sub]);
+                    // 15 override nibbles aligned at cols 1..15 (mode 0 left blank)
+                    for (rv_sub_col = 0; rv_sub_col < 15; rv_sub_col++) {
+                        if (rv_sub_high) {
+                            rv_sub_nib = group_children_request_values[rv_sub_row].group_children_request_values_x[rv_sub_col].value_B;
+                        } else {
+                            rv_sub_nib = group_children_request_values[rv_sub_row].group_children_request_values_x[rv_sub_col].value_A;
+                        }
+                        Printf(" %2d", rv_sub_nib);
+                    }
+                    Printf("\n");
                 }
-
-                Printf("\n");
-                used_controls = used_controls + (getControlName(list_of_controls[amount_of_unknown38_rows_with_value-1])) + Str("(%i), ", list_of_controls[amount_of_unknown38_rows_with_value-1]);
-           }
-        line_number++;
-        if (amount_of_unknown38_values_B > 0){
-                amount_of_unknown38_rows_with_value++;
-                Printf("  %i:\t %-30s (%02x)\t", line_number, getControlName(list_of_controls[groupsMatrixControlsArray[line_number]]),list_of_controls[groupsMatrixControlsArray[line_number]]);
-                filled_lines = filled_lines + Str("%i,",line_number);
-                for( j = 0; j < 15; j++)
-                {
-                    Printf("%01x\t", group_children_request_values[i].group_children_request_values_x[j].value_B);
-                }
-
-                Printf("\n");
-                used_controls = used_controls + (getControlName(list_of_controls[amount_of_unknown38_rows_with_value-1])) + Str("(%i), ", list_of_controls[amount_of_unknown38_rows_with_value-1]);
-
-           }
-            line_number++;
-}
-*/
-
-Printf("\n unknown_setting_8DA:\t");
-for (i=0;i<9;i++){
-        Printf("%i \t", unknown_setting_8DA[i] );
+            }
         }
-
-
-
-
-// Showing how the byte_active bytes are set for each control. Currently, the meaning of these values is unknown.
-Printf("\n\n Position Control                        \t 0xA67 \t 0xA85 \t Meaning\n");
-for( i = 0; i < 30; i++)
-{
-    if (list_of_controls[i] > 0){
-        Printf ("  %i:\t %-30s \t %i \t %i \n", i, getControlName(list_of_controls[i]), SettingBytes_again[i],SettingBytes_more[i]);
-   }
+    }
+}
+if (rv_count == 0) {
+    Printf(" (no active controls in list_of_grouped_controls)\n");
 }
 
+printTitle("Research — unknown_setting_8DA[9] (offset 0x8DA)");
+// Possibly default-after-long-press values. Each byte 0..6 observed.
+// On most datasets only bytes 1 and 2 are non-zero; byte 0 = 0 always seen.
+Printf(" Raw bytes:");
+for (i = 0; i < 9; i++) {
+    Printf(" %i", unknown_setting_8DA[i]);
+}
+Printf("\n");
+
+printTitle("Research — per-control variant flags (SettingBytes_again @ 0xA67 + SettingBytes_more @ 0xA85)");
+// These two parallel 30-byte arrays appear to encode platform/variant flags
+// per control. Empirical clustering:
+//   (3, 0)  most controls on standard FPA datasets
+//   (2, 0)  Engine/StartStop/Gearbox on standard datasets (powertrain tier)
+//   (2, 8)  ALL controls on Leon FR/Cupra series (LA/LE/LG/LI/LK/LO) — NO-FPA
+//           or pre-FPA platform marker
+// .bt author tested changing values: no observable effect on 0x38 matrix logic.
+Printf(" Pos  Control                          0xA67  0xA85\n");
+Printf(" ---  -----------------------------    -----  -----\n");
+for (i = 0; i < 30; i++) {
+    if (list_of_controls[i] > 0) {
+        Printf("  %2i  %-30s     %i      %i\n",
+            i,
+            getControlName(list_of_controls[i]),
+            SettingBytes_again[i],
+            SettingBytes_more[i]);
+    }
+}
+
+
+// ---- PHEV region map: one-line overview of every annotated PHEV slot ----
+// Renders only when the file is mk7-sized (PHEV region absent on mk8).
+if (mk7) {
+    printTitle("PHEV region map (0xAA3 .. 0xF1B)");
+    Printf(" Compact overview of all PHEV-region byte ranges. `H~%%` = our\n");
+    Printf(" hypothesis confidence; `KNOWN` means decoded + deployed.\n\n");
+    Printf(" Offset  Size  Name                                Hypothesis            H~%%\n");
+    Printf(" ------  ----  ----------------------------------  --------------------  -----\n");
+    Printf(" 0xAA3      8  PHEV_unknown_AA3                    (unknown)              -\n");
+    Printf(" 0xAA9      4  PHEV_unknown_AA9                    (unknown)              -\n");
+    Printf(" 0xAB3      4  PHEV_unknown_AB3                    (unknown)              -\n");
+    Printf(" 0xABC      1  PHEV_unknown_ABC                    (unknown, MZ=5)        -\n");
+    Printf(" 0xAFC      2  HybridTargetRange.maxRange          int16                 50%%\n");
+    Printf(" 0xAFE      2  HybridTargetRange.currentRange      int16                 50%%\n");
+    Printf(" 0xB00      4  HybridTargetRange.rangeUnit         int32 (BE-split?)     50%%\n");
+    Printf(" 0xB08      4  PHEV_unknown_B08                    (unknown)              -\n");
+    Printf(" 0xB5C     40  PHEV_unknown_B5C[20] ushort         (research)             -\n");
+    Printf(" 0xBB0     10  PHEV_unknown_BB0                    (research)             -\n");
+    Printf(" 0xBBA     20  PHEV_unknown_BBA[10] ushort         (research)             -\n");
+    Printf(" 0xBCE     10  PHEV_unknown_BCE                    (research)             -\n");
+    Printf(" 0xBD8    128  BD8_table[4x32]                     state-transitions     40%%\n");
+    Printf(" 0xC58     22  PHEV_unknown_C58                    (research)             -\n");
+    Printf(" 0xCD9      1  PHEV_unknown_CD9                    Audi/PHEV marker       -\n");
+    Printf(" 0xCDD      4  PHEV_unknown_CDD                    platform-specific      -\n");
+    Printf(" 0xCEC      1  battery_profile_op (BETA)           BatteryControl mask   75%%\n");
+    Printf(" 0xCF6      1  PHEV_unknown_CF6                    PHEV marker            -\n");
+    Printf(" 0xD02     10  PHEV_unknown_D02                    platform-specific      -\n");
+    Printf(" 0xD0C     12  hybrid_modes                        CharismaOperationMode 85%%  KNOWN\n");
+    Printf(" 0xD18     12  hybrid_modes_active                 companion byte         -\n");
+    Printf(" 0xD24    192  PHEV_unknown_D24                    12x16 records         35%%\n");
+    Printf(" 0xDE4     12  PHEV_unknown_DE4                    slot->profile-id      55%%\n");
+    Printf(" 0xDF0      6  PHEV_unknown_DF0                    (research)             -\n");
+    Printf(" 0xDF6     28  PHEV_unknown_DF6                    (research)             -\n");
+    Printf(" 0xE12      4  PHEV_unknown_E12                    (research)             -\n");
+    Printf(" 0xE16     14  PHEV_unknown_E16                    (research)             -\n");
+    Printf(" 0xE24      8  PHEV_unknown_E24                    (research)             -\n");
+    Printf(" 0xE2C     30  PHEV_unknown_E2C[5][6]              (research)             -\n");
+    Printf(" 0xE4A      4  PHEV_unknown_E4A                    (research)             -\n");
+    Printf(" 0xE56     64  PHEV_unknown_E56                    (research, 8x8?)       -\n");
+    Printf(" 0xE96      7  PHEV_unknown_E96                    config + 0xAE marker  30%%\n");
+    Printf(" 0xE9D     12  AID_mode_banner                     per-hybrid-slot banner 85%%  KNOWN\n");
+    Printf(" 0xEA9     20  PHEV_unknown_EA9                    (research)             -\n");
+    Printf(" 0xED7      4  PHEV_unknown_ED7                    (research)             -\n");
+    Printf(" 0xEF3      1  PHEV_unknown_EF3                    newer-PHEV marker      -\n");
+    Printf(" 0xF00      1  PHEV_unknown_F00                    KV=8 else 0            -\n");
+    Printf(" 0xF19      2  PHEV_unknown_F19                    DCC-slider variant     -\n");
+    Printf(" 0xF1B     15  PHEV_unknown_F1B (zeros)            reserved               -\n");
+    Printf(" 0xF1D      2  PHEV_unknown_F1D                    (research)             -\n");
+    Printf("\n KNOWN = decoded + deployed. See app_fpa Python tool + docs/fpa_research_notes.md\n");
+    Printf(" for the deployed semantics; see r10001 changelog for the PHEV-region annotations.\n");
+}
 
 printTitle("Checksum");
 Printf(" Checksum in file    : %06lx \n", ((unsigned long)dataset_checksum & 0xFFFFFFFFUL));
@@ -1541,44 +1718,61 @@ void printTitle( string title )
     Printf(" #################################################\n");
     }
 
-int groupMemberMatrixPosition (int value, int group){
-local int temp_order=0;
-local int temp_group=0;
-local int order = 0;
-local int factor = 0;
-
-   if (group == 4){ 
-        group= 3;
+// helper to print a per-control row of a 16-bit profile bitmask with one column
+// per bit. X = bit set, . = bit clear. Used by Allow (0x296) and Remember (0x2D2)
+// Printf sections.
+void printBitmaskRow(int rowIndex, int controlId, int bitmask) {
+    Printf("  %2d  %-30s %3d  |", rowIndex, getControlName(controlId), controlId);
+    local int bit_;
+    for (bit_ = 0; bit_ < 16; bit_++) {
+        if (bitmask & (1 << bit_)) {
+            Printf("  X");
+        } else {
+            Printf("  .");
+        }
     }
+    Printf("  | 0x%04x\n", bitmask & 0xFFFF);
+}
 
-for(i = 0 ; i < 30 ; i ++){
-	if (temp_group < grouped_controls[i]){
-		temp_order = 0;
-		temp_group = grouped_controls[i];
-		} else {
-		temp_order = temp_order+1;
-		}
-    if (i==value){
-        order= temp_order;
+// groupMemberMatrixPosition — maps a sub-control's position in list_of_controls[30]
+// to the matrix-line index (0..63) inside group_children_request_values[32][15].
+//
+// Previously this used "max group seen so far" tracking which only works for
+// monotone group layouts (e.g. OC's [1,1,1,1,2,2,...]) and BROKE on non-monotone
+// layouts like LPM0's [1,1,1,4,4,3,2,2,5,6,6]. The hack `if (group==4) group=3;`
+// was a partial patch for that bug.
+//
+// Correct algorithm (mirrors the Python app_fpa parser): "count earlier
+// positions belonging to the SAME group" — works for any layout.
+//
+// Matrix-line formula: line = factor*16 + sub_order + 2*(group-1)
+// where (factor, sub_order) come from how many earlier positions share this group.
+int groupMemberMatrixPosition(int value, int group) {
+    if (group < 1 || group > 8) return -1;
+    local int order = 0;
+    local int i_;
+    for (i_ = 0; i_ < value; i_++) {
+        if (grouped_controls[i_] == group) order++;
     }
-    }
-
-    if( order < 2){
+    local int factor = 0;
+    if (order < 2) {
         factor = 0;
-    }   else if (order < 4){
+    } else if (order < 4) {
         factor = 1;
-        order = order -2;
-    }   else if (order < 6){
+        order = order - 2;
+    } else if (order < 6) {
         factor = 2;
         order = order - 4;
-    }   else if (order < 8){
+    } else if (order < 8) {
         factor = 3;
-        order = order -6;
+        order = order - 6;
+    } else {
+        factor = 0; // orders >= 8 fall back to factor 0
     }
-    order = (factor * 16) + order + (2*(group-1));
-    groupsMatrixControlsArray[order] = value; 
-    return order;       
-}                               
+    order = (factor * 16) + order + (2 * (group - 1));
+    groupsMatrixControlsArray[order] = value;
+    return order;
+}
 
 local string filename = "";
 filename = "c:\\temp\\" + dataset_version +  ".txt";
