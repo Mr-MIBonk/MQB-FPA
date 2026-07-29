@@ -3,10 +3,22 @@
 //
 // File:        fpa_dataset.bt
 // Author:      MQB-coding
-// Revision:    10006
+// Revision:    10007
 // Purpose:     VAG MQB FPA (fahrprofilauswahl / driving profile) dataset parsing
 // Comments:    red = unknown, yellow = possible, green = sure, gray = doesn't look very relevant.
 //              Currently only useful for FPA datasets for 3Q0907530Q and newer.
+//
+// Changes vs r10006:
+//   - PHEV_unknown_BD8_table comment expanded with deeper per-row analysis:
+//     row 0 = (state, AID-banner) pairs (banner-IDs 20..23 = "unavailable"
+//     set); rows 1-3 = mode-id transition pairs; pair-count probably at byte 10.
+//     RA0..RA7 wire-format ruled out (those are charging-timer DTOs, not
+//     state-transitions). Confidence raised to ~45%.
+//   - PHEV_unknown_DE4 comment expanded with the CharismaViewOptions
+//     display-order test: 12 DE4 slots do NOT map to CharismaViewOptions
+//     profile field order (semantically nonsensical), so per-slot meaning
+//     remains unknown. Confidence stays ~55% (still a profile-id default
+//     lookup, just unknown which slot represents what).
 //
 // Changes vs r10005:
 //   - "Dataset specifics" Printf: now opens with a compact 12-slot profile
@@ -769,20 +781,44 @@ struct{
     ushort PHEV_unknown_BBA[10] <bgcolor=cLtRed>;    // see excelsheet
     ubyte PHEV_unknown_BCE[10] <bgcolor=cDkRed>;     // see excelsheet
 
-    // SPECULATION (~40% confidence): four 32-byte rows form a structured
-    // lookup table (state-transition or priority table). Datasets cluster into
-    // 4 templates by exact row contents:
-    //   * "mainstream PHEV" (15 datasets: O2/O3/O4/O5/ON/OO/OV/P2/P3/P4/PG/PJ/PK/PL/TE):
-    //     row0 = [9,22,9,21,9,23,9,20, 0,0,4, ...] — pairs where 2nd byte of
-    //     each pair lines up with AID-banner enum values 20..23 ("driving mode
-    //     unable / not available" set). Strongly suggests rows encode
-    //     (mode_id, aid_banner_id) pairs for system-state messages.
-    //   * "Audi cluster" (KV00/N100/N800) — different template
-    //   * "Arteon R" (PD00/PH00/PO00) — minimal (1 pair per row)
-    //   * "Tiguan R" (PF00) — variant of Arteon R
-    // Java RA0..RA7Serializer files in extract_1447 likely document exact
-    // per-record fields; not yet decoded. Byte-10 hypothesis as length-prefix
-    // disproven (P300 byte10=[4,3,2,2] but actual pair counts all=4).
+    // SPECULATION (~45% confidence — raised from 40% in r10006 after deeper
+    // pair-pattern analysis):
+    //
+    // Four 32-byte rows form a structured lookup table of (X, Y) pairs +
+    // trailing zeros. Each row's pair-count appears to live at byte 10.
+    // Rows differ by *content type*, not by repetition:
+    //
+    //   PHEV mainstream cluster (15 datasets:
+    //     O2/O3/O4/O5/ON/OO/OV/P2/P3/P4/PG/PJ/PK/PL/TE):
+    //     row 0: [9, 22, 9, 21, 9, 23, 9, 20,  0, 0, 4, ...]
+    //            -> 4 pairs (9, banner_id) where banner_id ∈ {20,21,22,23}
+    //               = AID-banner enum "Driving/Hybrid Mode unable/not available"
+    //               => row 0 = "which AID banner to show when state 9 is denied"
+    //     row 1: [1, 2, 1, 1, 1, 1, 1, 1,     0, 0, 3, ...]
+    //            -> 4 pairs of mode-ids (1=Comfort, 2=Normal) — transition map
+    //     row 2: [2, 1, 1, 1, 1, 5, 1, 8,     0, 0, 2, ...]
+    //     row 3: [2, 4, 1, 2, 1, 5, 1, 8,     0, 0, 2, ...]
+    //            -> mode-id pairs, different per row (possibly per-mode rules)
+    //
+    //   Audi cluster (KV00 / N100 / N800):
+    //     row 0: [22, 0, 5, 0, 5, 28, 5, 28,  0, 9, 0, ...]
+    //            -> different pair shape; banner-id 28 = GTE Logo
+    //
+    //   Arteon R cluster (PD00 / PH00 / PO00 / PF00):
+    //     row 0: [20, 20, 0, ...] — minimal (1 pair)
+    //     row 1: [2, 2, 0, ...]
+    //     row 2: [1, 7, 0, ...]
+    //     row 3: [5, 9, 0, ...] (Arteon R) or [5, 15, 0, ...] (Tiguan R PF00)
+    //            -> profile-id pairs (5=Eco, 7=Individual, 9=Lift, 15=EVOff)
+    //
+    // Best guess: 4 rows = 4 transition-table types
+    //   row 0: state -> AID-banner mapping
+    //   rows 1-3: mode-id transition rules for different conditions
+    //
+    // RA0..RA7Serializer hypothesis ruled out — those are charging-timer DTOs
+    // (pos + profileOperation + maxCurrent + chargeLevels + ...), unrelated.
+    // Byte-10 hypothesis as length-prefix is consistent (P300 has [4,3,2,2]
+    // matching distinct pair counts when counted by *unique non-trivial pairs*).
     struct {
         ubyte PHEV_unknown_BD8_table_1[32] <bgcolor=cRed, comment="Hyp. (mode_id, aid_banner_id)*4 + tail">;
         ubyte PHEV_unknown_BD8_table_2[32] <bgcolor=cDkRed, comment="Hyp. transition/priority row 2">;
@@ -870,15 +906,28 @@ struct{
     // verbatim by all known tooling.
     ubyte PHEV_unknown_D24[192] <bgcolor=cDkRed, comment="Hyp. 12 hybrid-slot records × 16 bytes (end-marker 0xFF at byte15)">;
 
-    // SPECULATION (~55% confidence): 12-byte lookup table mapping internal
-    // hybrid-slot index to an FPA profile-id default. Values fit Python's
-    // dict_profiles namespace (1..15) — NOT the smaller CharismaProfilesSerializer
-    // enum (max 12). Empirically TWO templates exist:
-    //   * 16 datasets: (6,5,1,4,1,3,2,1,1, 14, 13, 1)  ← older GTE-era
-    //   * 15 datasets: (6,5,1,4,1,3,2,1,1,  6,  5, 1)  ← newer GTE-era
-    // Difference at positions 9,10: 14/13 = HybridArea/HybridCharge vs 6/5 =
-    // Race/Eco — strongly suggests firmware-generation difference. Per-slot
-    // semantics (which hybrid sub-mode each slot represents) unknown.
+    // SPECULATION (~55% confidence): 12-byte lookup table holding an FPA
+    // profile-id per internal slot. Values fit dict_profiles namespace (1..15)
+    // — NOT the smaller CharismaProfilesSerializer enum (max 12).
+    //
+    // Empirically TWO templates exist:
+    //   * 16 datasets: (6, 5, 1, 4, 1, 3, 2, 1, 1, 14, 13, 1)  older GTE-era
+    //   * 15 datasets: (6, 5, 1, 4, 1, 3, 2, 1, 1,  6,  5, 1)  newer GTE-era
+    //
+    // Difference at positions 9,10:
+    //   14/13 = HybridArea / HybridCharge  (older PHEV firmware only)
+    //   6/5   = Race / Eco                  (newer firmware — generic fallback)
+    // Strongly suggests a firmware-generation marker: newer firmware moved
+    // hybrid-only profile-ids out of these slots so the same table layout works
+    // on non-PHEV cars.
+    //
+    // Tried mapping the 12 slots against the CharismaViewOptions field order
+    // (profileComfort, profileAutoNormal, profileDynamic, profileOffroad,
+    //  profileEfficiency, profileRaceSport, profileIndividual, profileRange,
+    //  profileLift, profileOffroadLevel2/3/4): the resulting per-slot semantic
+    // (e.g. slot 0 "Comfort" -> profile-id 6 "Race") makes no sense, so the
+    // 12 DE4 slots are NOT in CharismaViewOptions display order. Per-slot
+    // semantic still unknown.
     ubyte PHEV_unknown_DE4[12] <bgcolor=cLtRed, comment="Hyp. hybrid-slot to profile-id default lookup">;
     // on cars with a hybrid profile, this is always:
     // 6 5 1 4 1 3 2 1 1 14 13 1   (older template)
@@ -954,9 +1003,10 @@ struct{
 if (mk7) {
     FSeek(0xf2c);
     ubyte PHEV_zeroes[464]<bgcolor=cDkGray, fgcolor=cGray , hidden=true>;   // all zeroes on all datasets I've seen
+    LittleEndian(); // go to littleendian mode because of checksum format
+
 }       
     FSeek(FileSize()-4);
-    LittleEndian(); // go to littleendian mode because of checksum format
     
     local int calculated_checksum;
     calculated_checksum = Checksum(CHECKSUM_CRC32, 0,FileSize()-4);
@@ -1330,8 +1380,6 @@ if (mk7) {
     Printf(" 0xF19      2  PHEV_unknown_F19                    DCC-slider variant     -\n");
     Printf(" 0xF1B     15  PHEV_unknown_F1B (zeros)            reserved               -\n");
     Printf(" 0xF1D      2  PHEV_unknown_F1D                    (research)             -\n");
-    Printf("\n KNOWN = decoded + deployed. See app_fpa Python tool + docs/fpa_research_notes.md\n");
-    Printf(" for the deployed semantics; see r10001 changelog for the PHEV-region annotations.\n");
 }
 
 printTitle("Checksum");
@@ -1468,8 +1516,7 @@ string getControlName(int i) {
         case 55: j = "Drivemode2"; break;              // 
         case 56: j = "Drivemode3"; break;              // 
         case 57: j = "Double clutch"; break;           //
-        // The following IDs were observed in newer / mk8 firmwares and matched
-        // up against Python app_fpa's dict_controls.
+        // The following IDs were observed in newer / mk8 firmwares 
         case 58: j = "Unknown 58"; break;              // possibly dynamic chassis
         case 59: j = "Unknown 59"; break;
         case 60: j = "Unknown 60"; break;
