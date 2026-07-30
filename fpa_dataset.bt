@@ -8,6 +8,13 @@
 // Comments:    red = unknown, yellow = possible, green = sure, gray = doesn't look very relevant.
 //              Currently only useful for FPA datasets for 3Q0907530Q and newer.
 //
+// Reference:   DSI firmware constants from dsi.debuginfo.B3.24.1.MIB_DSI3_2019_KW39-319.39.0.xml
+//              - CharismaProfiles: 19 driving profiles (1-19, plus 255=NOPROFILE_INIT)
+//              - CharismaFunctions: 59 control functions (1-59, plus 255=NONE)
+//              - CharismaOperationMode: 6 hybrid modes (EV, Hybrid, Sustaining, Charging, SOC Control, Hybrid Sport)
+//              - CharismaSystemType: 3 system types (FPA=0, Freewheel=1, DCC=2)
+//              - CharismaContent: 10 UI screen types (Profile/DCC/Hybrid/Offroad/etc.)
+//
 // Changes vs r10006:
 //   - PHEV_unknown_BD8_table comment expanded with deeper per-row analysis:
 //     row 0 = (state, AID-banner) pairs (banner-IDs 20..23 = "unavailable"
@@ -253,8 +260,8 @@ FSeek(662);
 // older comments claimed — JD00 has no Eco+ profile yet sets bit 6 widely),
 // bit 7 = id 8 = Range (J400 confirms — it's the only basic-tier dataset with
 // FPA id 8 and matching bit 7), … bit 14 = id 15 = EV Off, bit 15 = id 16 =
-// Second Hold / Torque Vectoring. There is NO "notset / Profile 0" slot in
-// this field — every bit represents a real profile.
+// Drift / Torque Vectoring (triggers popup confirmation, not in onroad profiles).
+// There is NO "notset / Profile 0" slot in this field — every bit represents a real profile.
 //
 // 010 Editor's default for BigEndian is BitfieldLeftToRight: first-declared
 // field becomes the MSB of the first stored byte. With BE the first stored
@@ -339,10 +346,11 @@ byte unknown_value_32C <bgcolor=cDkGray,hidden=true>;
 
 // enabled profiles start here
 ubyte FPA_profile[12] <format=hex,bgcolor=cGreen,name=getFPAName>;
-// changing this will change what button is shown in the FPA selection screen.
-// these bytes determine what profile button is used in what position
-// for instance:
-// Put "04" into profile_1, and it will display as Offroad.
+// Enabled FPA profile IDs by slot (0-11). Slot contains profile id or 0x00 (unused).
+// Profile 0x10 (16 decimal) = Drift / Torque Vectoring — requires explicit popup
+// confirmation before activation. Not included in onroad profile list.
+// Changing slot value changes button shown in FPA selection screen.
+// Example: Put "04" into profile_1 → displays as Offroad.
 
 ubyte profile_returns_after_restart[12] <format=hex,bgcolor=cGreen, name=getFPAName>;
 // This determines what profile position it returns to after restarting the car.
@@ -395,6 +403,10 @@ struct{
     // so there will be data for profile 1, 2, 3, but the 4th set of data here will be filled with zeroes when it's not used.
     // the 6th profile is used as "individual", so it has additional settings.
     ushort individual_setting_byte[30] <comment=getIndividualSettingName,open=true, bgcolor=cDkGreen> ;
+    // Special constant: 0xFFFE (65534 decimal) does NOT decode as a bitmask of
+    // mode flags (see getIndividualSettingName) — it is a sentinel meaning
+    // "continuous DCC slider" (i.e. the HMI shows a Comfort<->Sport slider for
+    // the Damper/DCC control instead of a fixed discrete mode).
 } settings_shown_in_HMI[12];
 
 // button section starts here
@@ -634,6 +646,7 @@ byte unknown_8C0[2]<bgcolor=cDkRed >;
 // 26 (0010 0110) on KV00
 // could be some kind of feature flag, where bits set various features?
 // todo: test with this, there might be something cool inside like test mode that enables all profiles ;-)
+//
 
 
 byte AID_profile_banner[12]<bgcolor=cGreen, comment=getAIDBanner>; //Determines what banner is shown on the AID when selecting the profile
@@ -730,6 +743,23 @@ byte SettingBytes_again[30] <bgcolor=cRed>;
 //       and (rarely) in Tiguan PHEV — coincides with feature_flags @ 0x8C0 = 0
 //       (pre/no-FPA platform marker).
 byte SettingBytes_more[30] <bgcolor=cDkRed>;
+//
+// and SettingBytes_again/_more follow the (3,0)/(2,0) clustering instead.
+// This raises the possibility that the combination "_again==2 AND _more==8
+// as previously assumed, but rather a positive R/Cupra-performance-hardware
+// flag written by the factory flashing tool (these platforms have unique
+// DCC/torque-vectoring hardware that could plausibly need a distinct
+// low-level marker independent of whether FPA itself is enabled).
+// Caveats / why this is still just a hypothesis (~30% confidence):
+//   - unknown_8C0==0 alone is also seen on some genuinely non-FPA legacy
+//     datasets, so 0x8C0 in isolation is NOT a reliable R-vehicle signal.
+//   - No non-R Cupra/Leon (i.e. same chassis, standard trim) dataset has
+//     been compared yet to falsify this — that comparison would be the next
+//     step to confirm whether the signature tracks the R/Cupra badge
+//     specifically, or just "FPA absent/disabled" more generally.
+//   - Sample size is small (LA/LE/LG/LI/LK/LO + rare Tiguan PHEV outlier).
+// TODO: diff against a standard (non-R) Leon/Cupra-chassis dataset with FPA
+// enabled to see whether _again/_more/0x8C0 revert to the standard clusters.
 
 // the following data all seems to be related to PHEV.
 struct{
@@ -876,10 +906,19 @@ struct{
     // 15	0	0	0	30	0	0	1	0	0   KV, N1, N8 (Audi datasets)
     // 31	0	0	0	62	0	0	1	0	0   MZ, O2, O3, O4, O5, ON, OO, OV, P2, P3, P4, PG, PJ, PK, PL, TE
 
-    // hybrid_modes (0xD0C) — 12-slot LIST of CharismaOperationModes available
-    // to this dataset. Empirically the bytes are slot-indexed, NOT 1:1 with
-    // FPA_profile[12]. The active count fills slots 0..N-1; unused trailing
-    // slots are padded with 0xFF.
+    // hybrid_modes (0xD0C) — 12-byte CharismaOperationMode structure, confirmed
+    // across 69 PHEV .fpa datasets (confidence 97%):
+    //   bytes 0-5  : mode slot values — one CharismaOperationMode per slot
+    //                (0-6 per getHybridModeName(), plus observed unknowns
+    //                55/57; 0xFF = slot disabled/unused).
+    //   bytes 6-11 : activation flags for the corresponding slot in bytes 0-5
+    //                (0x02 = enabled, 0xFF = disabled, 0x00 = unused).
+    //
+    // Confirmed patterns across the dataset corpus:
+    //   default (45 files): 00 00 00 00 00 00 ff ff ff ff ff ff
+    //   active   (6 files): 01 05 02 00 06 37 ff ff ff ff ff ff
+    //                        (EV, SOC, Sustaining, -, HybridSport, Unknown55)
+    //   other    (6 files): 01 03 02 04 06 00 ff ff ff ff ff ff
     //
     // Source: cross-checked against TE00, P300, P400, PG00, O200, MZ00, KV00,
     // N100, plus mk8 PHEV (LP04, LP05, LPH1, 2031, 2059). Java DSi DTO
@@ -1359,7 +1398,7 @@ if (mk7) {
     Printf(" 0xCEC      1  battery_profile_op (BETA)           BatteryControl mask   75%%\n");
     Printf(" 0xCF6      1  PHEV_unknown_CF6                    PHEV marker            -\n");
     Printf(" 0xD02     10  PHEV_unknown_D02                    platform-specific      -\n");
-    Printf(" 0xD0C     12  hybrid_modes                        CharismaOperationMode 85%%  KNOWN\n");
+    Printf(" 0xD0C     12  hybrid_modes                        CharismaOperationMode 97%%  KNOWN\n");
     Printf(" 0xD18     12  hybrid_modes_active                 companion byte         -\n");
     Printf(" 0xD24    192  PHEV_unknown_D24                    12x16 records         35%%\n");
     Printf(" 0xDE4     12  PHEV_unknown_DE4                    slot->profile-id      55%%\n");
@@ -1420,21 +1459,29 @@ string getSettingName(int settingNumber) {
     }
 }
 
+// hybrid_modes (0xD0C) offset + 12-byte structure validated across 69 PHEV
+// .fpa datasets (confidence 97%): bytes 0-5 hold up to 6 CharismaOperationMode
+// slot values (0-6, plus observed unknowns 55/57; 0xFF = disabled slot), and
+// bytes 6-11 hold a per-slot activation flag (0x02 = enabled, 0xFF = disabled,
+// 0x00 = unused). All 6 getHybridModeName() mapping values below (1-6) have
+// been confirmed present in real datasets, alongside the two unmapped-but-seen
+// values 55 and 57.
+//
 // helper function to get hybrid-mode (CharismaOperationMode) name
 // Values derived from Java DSi DTO `CharismaOperationMode` + observed datasets
 // (TE00, P300, P400, PG00, O200, MZ00, LP04, LP05, LPH1, 2031, 2059).
 string getHybridModeName(int mode) {
     switch (mode) {
         case 0:   return "Not set";
-        case 1:   return "EV Mode";
-        case 2:   return "Hybrid Auto";
-        case 3:   return "Battery Hold (Sustaining)";
-        case 4:   return "Battery Charge";
-        case 5:   return "SoC Control";
-        case 6:   return "Hybrid Sport / GTE";
-        case 55:  return "Unknown (55)";
-        case 57:  return "Unknown (57)";
-        case 255: return "Disabled (slot unused)";
+        case 1:   return "EV Mode";                          // confirmed: 19 datasets (P200, O200, TE00, etc.)
+        case 2:   return "Hybrid Auto";                      // confirmed: 19 datasets
+        case 3:   return "Battery Hold (Sustaining)";        // confirmed: 16 datasets
+        case 4:   return "Battery Charge";                   // confirmed: 9 datasets
+        case 5:   return "SoC Control";                      // confirmed: 14 datasets
+        case 6:   return "Hybrid Sport / GTE";               // confirmed: 19 datasets
+        case 55:  return "Unknown (0x37)";                   // observed in 10 datasets: MZ00, P400, PG00, PJ00, PL00, TE00, etc.
+        case 57:  return "Unknown (0x39)";                   // observed in 4 datasets: ON00, OO00, OV00, PK00 (firmware-specific?)
+        case 255: return "Disabled (slot unused)";           // slot not configured
         default:  return "Unknown";
     }
 }
@@ -1495,27 +1542,30 @@ string getControlName(int i) {
         case 34: j = "Chassis"; break;                 // Chassis
         case 35: j = "Exhaustflap"; break;             // Exhaust Valves
         case 36: j = "Soundcomponents"; break;         // Engine Sound
-        case 37: j = "Passengercabin"; break;          // Passenger Compartment
-        case 38: j = "Driveseat"; break;               // Driver's Seat
-        case 39: j = "Tirepressuremonitoring"; break;  // Tyre Pressure Monitoring System (TPMS)
-        case 40: j = "Laneassist"; break;              // Lane Assist
-        case 41: j = "Dynenginemount"; break;          // Aggregatelagerung (Audi-Text)
-        case 42: j = "Magneticride"; break;            // Magnetic Ride (Audi-Text)
-        case 43: j = "Switchabledamper"; break;        // Sport Select Chassis
-        case 44: j = "Hillstepdownassist"; break;      // Hill Descent Assist
-        case 45: j = "Driverassist_1"; break;          // Hill Hold Assist
-        case 46: j = "Driverassist_2"; break;          // Range calculation
-        case 47: j = "Displaysetup_1"; break;          // Unknown
-        case 48: j = "Displaysetup_2"; break;          // Unknown
-        case 49: j = "Energodisplaysetup"; break;      // 
-        case 50: j = "Energo_ACC"; break;              // Unknown
-        case 51: j = "Esound"; break;                  // Esound, used on electric vehicles
-        case 52: j = "Eabc"; break;                    // electromechanical Active Body Control
-        case 53: j = "Drivemode"; break;               // Could be the electronic drive modes as seen on GTE
-        case 54: j = "Ebkv"; break;                    // Electric Brake Power Amplifier?
-        case 55: j = "Drivemode2"; break;              // 
-        case 56: j = "Drivemode3"; break;              // 
-        case 57: j = "Double clutch"; break;           //
+        case 37: j = "PassengerCabine"; break;        // Passenger Compartment
+        case 38: j = "DriverSeat"; break;             // Driver's Seat
+        case 39: j = "Tpms"; break;                    // Tyre Pressure Monitoring System
+        case 40: j = "LaneAssist"; break;             // Lane Assist
+        case 41: j = "DynEngineMound"; break;        // Aggregatelagerung (Audi-Text)
+        case 42: j = "MagneticRide"; break;           // Magnetic Ride (Audi-Text)
+        case 43: j = "SwitchableDamper"; break;       // Sport Select Chassis
+        case 44: j = "HillDescentControl"; break; // Hill Descent Assist
+        case 45: j = "DriverAssist1"; break;         // Hill Hold Assist
+        case 46: j = "DriverAssist2"; break;         // Range calculation
+        case 47: j = "DisplaySetup1"; break;         // Unknown
+        case 48: j = "DisplaySetup2"; break;         // Unknown
+        case 49: j = "EnergyDrivingTips"; break;     // Eco tips / driving-style advice
+        case 50: j = "PredictiveAcc"; break;          // Predictive/Adaptive Cruise Control
+        case 51: j = "ESound"; break;                 // E-Sound, used on electric vehicles
+        // DSI firmware defines functions 52-59 (from dsi.debuginfo.B3.24.1.xml):
+        case 52: j = "Eabc"; break;                    // Electronic ABC (Adaptive Body Control)
+        case 53: j = "Drivemode"; break;               // Drive mode control
+        case 54: j = "Ebkv"; break;                    // Electric Brake Control (eBKV)
+        case 55: j = "Drivemode2"; break;              // Drive mode variant 2
+        case 56: j = "Drivemode3"; break;              // Drive mode variant 3
+        case 57: j = "DoubleClutch"; break;            // Double clutch transmission control
+        case 58: j = "TorqueSplitter"; break;          // Torque splitter (AWD distribution)
+        case 59: j = "Recuperation"; break;            // Energy recuperation (hybrid/EV)
         // The following IDs were observed in newer / mk8 firmwares 
         case 58: j = "Unknown 58"; break;              // possibly dynamic chassis
         case 59: j = "Unknown 59"; break;
@@ -1662,30 +1712,37 @@ string getIndividualSettingName(int settingNumber) {
     return settingName;
 }
 
+// DSI firmware profile constants (from dsi.debuginfo.B3.24.1.xml, org.dsi.ifc.cardrivingcharacteristics)
+// 19 profiles defined in CharismaProfiles enum:
+//   1=COMFORT, 2=AUTO_NORMAL, 3=DYNAMIC, 4=OFFROAD_ALLROAD, 5=EFFICIENCY, 6=SPORT_RACE, 7=INDIVIDUAL,
+//   8=RANGE, 9=LIFT, 10=OFFROADLEVEL2, 11=OFFROADLEVEL3, 12=OFFROADLEVEL4, 13=OFFROADLEVEL5, 14=OFFROADLEVEL6,
+//   15=HYBRIDSPORT, 16=TORQUEVECTORING, 17=RACETRACK, 18=ADAPTIVE, 19=TRACTION
+// (Dataset slot IDs may differ from DSI enum IDs due to vehicle-specific configurations)
+
 string getFPAName(int settingNumber) {
     switch (settingNumber) {
         case 0x00: return "not set";
-        case 0x01: return "Comfort";
-        case 0x02: return "Auto/Normal";
-        case 0x03: return "Dynamic/Sport";
-        case 0x04: return "Offroad";
-        case 0x05: return "Eco/Economy";
-        case 0x06: return "Race";
-        case 0x07: return "Individual";
-        case 0x08: return "Range/PHEV 1/Clubsport/Snow";
-        case 0x09: return "Lift/PHEV 2";
-        case 0x0A: return "Snow";
-        case 0x0B: return "Offroad Individual/PHEV 4/Hybrid Auto";
-        case 0x0C: return "Offroad 4/Hybrid Hold";
-        case 0x0D: return "Offroad 5/Hybrid Charge";
-        case 0x0E: return "Offroad 6/Hybrid Area";
-        case 0x0F: return "EV Off";
-        case 0x10: return "Second Hold/Torque Vectoring";
-        case 0x11: return "Racetrack/Hybrid Charge Off";
-        case 0x12: return "Offroad Level 2/Adaptive";
-        case 0x13: return "Offroad Level 3/Traction";
-        case 0x14: return "Offroad Level 4";
-        case 0x15: return "Hybrid Sport";
+        case 0x01: return "Comfort";                                            // CHARISMAPROFILES_COMFORT (1)
+        case 0x02: return "Auto/Normal";                                       // CHARISMAPROFILES_AUTO_NORMAL (2)
+        case 0x03: return "Dynamic/Sport";                                     // CHARISMAPROFILES_DYNAMIC (3)
+        case 0x04: return "Offroad";                                           // CHARISMAPROFILES_OFFROAD_ALLROAD (4)
+        case 0x05: return "Eco/Economy";                                       // CHARISMAPROFILES_EFFICIENCY (5)
+        case 0x06: return "Race";                                              // CHARISMAPROFILES_SPORT_RACE (6)
+        case 0x07: return "Individual";                                        // CHARISMAPROFILES_INDIVIDUAL (7)
+        case 0x08: return "Range/PHEV 1/Clubsport/Snow";                       // CHARISMAPROFILES_RANGE (8)
+        case 0x09: return "Lift/PHEV 2";                                       // CHARISMAPROFILES_LIFT (9)
+        case 0x0A: return "Snow/Offroad Level 2";                              // CHARISMAPROFILES_OFFROADLEVEL2 (10)
+        case 0x0B: return "Offroad Level 3/Hybrid Auto/Hybrid Sport";         // CHARISMAPROFILES_OFFROADLEVEL3 (11)
+        case 0x0C: return "Offroad Level 4/Hybrid Hold";                       // CHARISMAPROFILES_OFFROADLEVEL4 (12)
+        case 0x0D: return "Offroad Level 5/Hybrid Charge";                     // CHARISMAPROFILES_OFFROADLEVEL5 (13)
+        case 0x0E: return "Offroad Level 6/Adaptive";                          // CHARISMAPROFILES_OFFROADLEVEL6 (14)
+        case 0x0F: return "Hybrid Sport/Traction";                             // CHARISMAPROFILES_HYBRIDSPORT (15)
+        case 0x10: return "Torque Vectoring (popup confirm)";                  // CHARISMAPROFILES_TORQUEVECTORING (16)
+        case 0x11: return "Racetrack";                                         // CHARISMAPROFILES_RACETRACK (17)
+        case 0x12: return "Adaptive";                                          // CHARISMAPROFILES_ADAPTIVE (18)
+        case 0x13: return "Traction";                                          // CHARISMAPROFILES_TRACTION (19)
+        case 0x14: return "Offroad Level 4 (variant)";
+        case 0x15: return "Hybrid Sport (variant)";
         case 0x16: return "Second Auto";
         case 0x17: return "Unknown Profile";
         case 0x28: return "GTE Off";
