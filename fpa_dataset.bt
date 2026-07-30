@@ -1066,11 +1066,6 @@ if (mk7) {
     ulong dataset_checksum       <format=hex,bgcolor=cGreen,comment="CRC32">;
 
 
-FSeek(2006);
-ubyte button_for_test[32];
-
-
-
 
 
 // Don't mess with anything below here, unless you know what you're doing.
