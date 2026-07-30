@@ -5,7 +5,7 @@
 // Author:      MQB-coding
 // Revision:    10007
 // Purpose:     VAG MQB FPA (fahrprofilauswahl / driving profile) dataset parsing
-// Comments:    red = unknown, yellow = possible, green = sure, gray = doesn't look very relevant.
+// Comments:    red = unknown, yellow = possible, green = sure, gray = doesn't look very relevant, black=padding
 //              Currently only useful for FPA datasets for 3Q0907530Q and newer.
 //
 // Reference:   DSI firmware constants from dsi.debuginfo.B3.24.1.MIB_DSI3_2019_KW39-319.39.0.xml
@@ -15,96 +15,6 @@
 //              - CharismaSystemType: 3 system types (FPA=0, Freewheel=1, DCC=2)
 //              - CharismaContent: 10 UI screen types (Profile/DCC/Hybrid/Offroad/etc.)
 //
-// Changes vs r10006:
-//   - PHEV_unknown_BD8_table comment expanded with deeper per-row analysis:
-//     row 0 = (state, AID-banner) pairs (banner-IDs 20..23 = "unavailable"
-//     set); rows 1-3 = mode-id transition pairs; pair-count probably at byte 10.
-//     RA0..RA7 wire-format ruled out (those are charging-timer DTOs, not
-//     state-transitions). Confidence raised to ~45%.
-//   - PHEV_unknown_DE4 comment expanded with the CharismaViewOptions
-//     display-order test: 12 DE4 slots do NOT map to CharismaViewOptions
-//     profile field order (semantically nonsensical), so per-slot meaning
-//     remains unknown. Confidence stays ~55% (still a profile-id default
-//     lookup, just unknown which slot represents what).
-//
-// Changes vs r10005:
-//   - "Dataset specifics" Printf: now opens with a compact 12-slot profile
-//     summary table (slot/id/name/return/banner/LED) for quick at-a-glance scan,
-//     followed by the per-profile detailed setting blocks.
-//   - "HMI" Printf BUG FIX: titles previously called getSettingName(slot+1) which
-//     used the mode-id enum (Comfort/Normal/Sport...) and printed wrong per-slot
-//     headers. Replaced with getFPAName(FPA_profile[slot]) — the actual profile
-//     name from that slot. Also skips empty slots and added a header row.
-//   - "Research" Printf split into two clearly-titled subsections:
-//     unknown_setting_8DA + per-control variant flags (SettingBytes_again/_more).
-//   - SettingBytes_again[30] and SettingBytes_more[30] declarations now have
-//     header comments documenting the empirical clusters we discovered
-//     (legacy names kept for backward compat; semantics now spelled out).
-//   - unknown_value_32C, profile_0_nodata get clarifying header comments.
-//   - Removed duplicate ushort parses of allow/remember regions
-//     (`function_bytes_settings_shifted_by_1_bit` + `function_bytes_settings`).
-//     Printf now reads the BE u16 directly via ReadUByte()<<8|ReadUByte().
-//   - New "PHEV region map" Printf section before Checksum: one-line overview of
-//     every annotated PHEV-region byte range with name, hypothesis label, and
-//     confidence level. Compact research overview.
-//
-// Changes vs r10004:
-//   - "Request values (0x8FB)" and "Sub-control request-value overrides (0x26)"
-//     Printf sections merged into one combined "Request values + sub-control
-//     overrides" table. Each main control row is followed by indented sub-control
-//     rows (prefixed `>`) for grouped controls — mirrors how the Python app_fpa
-//     UI renders the nested layout. Sub rows leave column 0 blank (no override
-//     for mode-id 0). Single header + legend at top, no separate title block.
-//
-// Changes vs r10003:
-//   - "Allowed to change in specific mode (0x296)" + "Remember setting after
-//     car restart (0x2D2)" Printf sections rewritten. Old version used ASCII
-//     "┐│" arrow art over 16 column header lines that misaligned with the
-//     IntToBinaryStr-rendered body, was nearly unreadable. New version uses a
-//     fixed-width column-per-bit grid (X/.) with a bit-to-profile legend at
-//     top, mirrors how the Python app_fpa renders the checkbox grid. New
-//     helper `printBitmaskRow()` shared between both sections.
-//
-// Changes vs r10002:
-//   - "Request values (0x8FB)" Printf rewritten. Old version used
-//     `request_values_0..7` paired-column headers that misaligned with the
-//     16-column body and included confusing labels ("00 cmft(1) nrml(2) ...").
-//     New version: clean fixed-width columns (3-char per mode-id), proper
-//     header row separator, mode-id legend at top, one row per active
-//     control with the 16 nibble values inline.
-//
-// Changes vs r10001:
-//   - groupMemberMatrixPosition() rewritten: now uses "count earlier positions
-//     belonging to the SAME group" algorithm (mirrors Python app_fpa parser).
-//     Previous "max-group-seen" tracking only worked for monotone group layouts
-//     and broke on non-monotone layouts like LPM0 [1,1,1,4,4,3,2,2,5,6,6].
-//     The hack `if (group==4) group=3;` is removed.
-//   - Setting-Groups Printf callsite now uses group_member_request_values_controls[g-1]
-//     (the authoritative group-header field @0x206), not list_of_grouped_controls[g-?]
-//     with a special case for group 4.
-//   - "Sub-control request-value overrides" Printf section: re-enabled (was
-//     commented out) and rewritten to iterate per-sub-control rather than per
-//     physical matrix row. Mirrors Python app_fpa's child_entries rendering —
-//     prints sub-control name + 15 profile values per row, much more readable.
-//
-// Changes vs r10000:
-//   - Annotated several PHEV-region unknowns with hypothesised semantics derived
-//     from MIB infotainment Java decompile (DSi serializers under
-//     de/esolutions/fw/comm/dsi/carhybrid/ + cardrivingcharacteristics/).
-//     All annotations are SPECULATIVE — confidence levels marked per field.
-//     No byte layout changes; only comments. See per-field SPECULATION notes.
-//
-// Changes vs r9999:
-//   - control_is_allowed_to_change (0x296) bit-field relabeled. New mapping:
-//       u16 bit N = FPA profile-id (N + 1). Old labels were off-by-one for
-//       decls 0..9 (high byte + first two low-byte fields).
-//   - control_is_reset (0x2D2) bit-field: decl 8 renamed from "ecoplus" to
-//       "id7_individual" (rest already matched u16 bit N = profile-id N).
-//   - hybrid_modes (0xD0C) annotated with getHybridModeName + slot-indexed
-//       semantics note (NOT 1:1 with FPA_profile[12]).
-//   - AID_mode_banner (0xE9D) annotated as slot-indexed (paired with hybrid_modes).
-//   - getControlName extended with IDs 58..81 (mk8 / newer firmwares).
-//   - getHybridModeName helper added (CharismaOperationMode mapping).
 //--------------------------------------
 OutputPaneClear();
 local int groupsMatrixControlsArray[64];
@@ -145,10 +55,13 @@ struct{
     byte header_17 <bgcolor=cDkGray>; // always 0
 } header2;
 
+// Gap at 0x18-0x25 (14 bytes after header2). Verified across all 99 datasets:
+// - 98/99 files: all 0x00 (confirmed padding)
+// - 1/99 file (OJ00.fpa): has 0xB0 at byte offset +5 (0x1D) — purpose unknown, preserved verbatim
+ubyte unk_18_reserved[14] <bgcolor=cDkGray>;
 
 // From here it appears to be some kind of table, 32 rows, 15 colums, or something like that.
 // it appears to override the request values before they are sent to a control module
-FSeek(38);
 struct{
     struct{
         ubyte value_B:4<bgcolor=cDkGreen>;
@@ -156,55 +69,10 @@ struct{
         }group_children_request_values_x [15]<optimize=true>;
 }group_children_request_values[32]<optimize=true>;
 
-// findings so far:
-// on these datasets, the controls line up with their respective position in list_of_grouped_controls:
-// IB (Golf 2019)
-// J6 (Tiguan 2019)
-// JA (Golf R 310)
-// JD (Golf Standard)
-// N1 (A3 tdi 2018)
-// OC (Magotan 2021 with DCC Slider)
-// OS (GTI 2021)
-// OY
-
-
-// looks like they match:
-// M9 (Octavia 2019)
-// MJ (Superb 2020)
-
-
-// on these datasets, they don't:
-// LI (Leon FR 2020)
-// LK (Leon Cupra 300)
-// LO (Leon Cupra)
-// O2 (Magotan 2021 GTE)
-
-
-
 
 FSeek(518);
 ubyte group_member_request_values_controls[8] <bgcolor=cDkGreen,name=getControlName>;
 ubyte amount_of_members_per_group[8] <bgcolor=cGreen>;
-
-
-// these are the names of the groups.
-// examples:
-
-// IB   21 FF FF FF FF FF FF FF 04          - 1 group, 4 controls
-// J6   21 FF FF FF FF FF FF FF 04          - 1 group, 4 controls
-// JA   21 24 FF FF FF FF FF FF 03 02       - 2 groups, 3+2 controls
-// JD   21 FF FF FF FF FF FF FF 04          - 1 group, 4 controls
-// N1   03 0A FF FF FF FF FF FF 04 03       - 2 groups, 4 controls, 3 controls
-// OC   21 24 FF FF FF FF FF FF 04 02       - 2 groups, 4 controls, 2 controls
-// OS   21 FF FF FF FF FF FF FF 04          - 1 group, 4 controls
-// OY   21 24 FF FF FF FF FF FF 04 02       - 2 groups, 4 + 2 controls
-
-// LI   01 FF FF FF FF FF FF FF 05          - 1 group, 5 controls
-// LK   01 FF FF FF FF FF FF FF 06          - 1 group, 6 controls
-// LO   01 FF FF FF FF FF FF FF 07          - 1 group, 7 controls
-// O2   00 FF FF FF FF FF FF FF FF          - no groups
-// PF   21 24 07 FF FF FF FF FF 03 02 02    - 3 groups, 3+2+2 controls
-// Having 3+2+2 in dataset PF rules out that this is anything other than group size.
 
 ubyte reserved_for_future_use[32] <bgcolor=cDkGray, hidden=true>; // always zeroes
 // these determine specifically which controls are set in the group member matrix.
@@ -244,10 +112,6 @@ ubyte reserved_for_future_use_2[80] <bgcolor=cDkGray, hidden=true>; // always ze
 
 
 
-// (Removed in r10006: previously declared a parallel `ushort
-// function_bytes_settings_shifted_by_1_bit[30]` over the same bytes the
-// allow-bitfield struct consumes, just to give Printf an easy ushort handle.
-// Printf now uses ReadUShort(0x296 + i*2) directly — no second parse needed.)
 FSeek(662);
 // control_is_allowed_to_change (0x296) — 16-bit per control, big-endian.
 //
@@ -256,11 +120,10 @@ FSeek(662);
 //
 //     u16 bit N = FPA profile-id (N + 1)
 //
-// So bit 0 = id 1 = Comfort, bit 6 = id 7 = Individual (NOT "Eco plus" as the
-// older comments claimed — JD00 has no Eco+ profile yet sets bit 6 widely),
-// bit 7 = id 8 = Range (J400 confirms — it's the only basic-tier dataset with
-// FPA id 8 and matching bit 7), … bit 14 = id 15 = EV Off, bit 15 = id 16 =
-// Drift / Torque Vectoring (triggers popup confirmation, not in onroad profiles).
+// So bit 0 = id 1 = Comfort, bit 6 = id 7 = Individual, bit 7 = id 8 = Range
+// (J400 is the only basic-tier dataset with FPA id 8, matching bit 7), … bit
+// 14 = id 15 = EV Off, bit 15 = id 16 = Drift / Torque Vectoring (triggers
+// popup confirmation, not in onroad profiles).
 // There is NO "notset / Profile 0" slot in this field — every bit represents a real profile.
 //
 // 010 Editor's default for BigEndian is BitfieldLeftToRight: first-declared
@@ -270,8 +133,6 @@ FSeek(662);
 //   decl 7 -> u16 bit  8 -> id  9
 //   decl 8 -> u16 bit  7 -> id  8
 //   decl 15-> u16 bit  0 -> id  1
-// The labels below are renamed accordingly. Old labels (evoff/hybridarea/...)
-// were off-by-one for the high byte (they assumed remember-style encoding).
 struct {
     // HIGH byte → u16 bits 15..8 → profile-ids 16..9
     ubyte allowed_to_change_in_id16_second_hold:        1 <read = getYesNo>; // u16 bit 15
@@ -293,8 +154,6 @@ struct {
     ubyte allowed_to_change_in_id2_normal:              1 <read = getYesNo>; // u16 bit  1
     ubyte allowed_to_change_in_id1_comfort:             1 <read = getYesNo>; // u16 bit  0
     } control_is_allowed_to_change[30]               <bgcolor=cGreen,optimize=true>;
-// (Removed in r10006: same dedup as the allow side — the parallel ushort
-// declaration over the remember bytes is gone. Printf uses ReadUShort(0x2D2 + i*2).)
 FSeek(722);
 // control_is_reset (0x2D2) — 16-bit per control, big-endian.
 //
@@ -303,15 +162,13 @@ FSeek(722);
 //     u16 bit N = FPA profile-id N   (no +1 shift)
 //
 // So bit 0 = id 0 = "Profile 0" / notset, bit 1 = id 1 = Comfort, bit 7 = id 7
-// = Individual (NOT "Eco plus" — JD00 DCC sets bits 1..3 = Comfort/Normal/
-// Sport, which is the common DCC remember pattern), bit 15 = id 15 = EV Off.
+// = Individual (JD00 DCC sets bits 1..3 = Comfort/Normal/Sport, the common DCC
+// remember pattern), bit 15 = id 15 = EV Off.
 // The 1-bit shift relative to the allow field comes from "notset" living at
 // the LOW-byte LSB in remember vs sitting between the byte boundaries (and
 // being meaningless) in allow.
 //
 // With BE + BitfieldLeftToRight: decl 0 -> u16 bit 15, decl 15 -> u16 bit 0.
-// Only decl 8 ("ecoplus") was misnamed — it actually represents id 7 =
-// Individual. Renamed below to match the empirical truth.
 struct {
     // HIGH byte → u16 bits 15..8 → profile-ids 15..8
     ubyte remember_after_reset_in_id15_ev_off:             1 <read = getYesNo>; // u16 bit 15
@@ -324,7 +181,7 @@ struct {
     ubyte remember_after_reset_in_id8_range_phev1:         1 <read = getYesNo>; // u16 bit  8
 
     // LOW byte → u16 bits 7..0 → profile-ids 7..0
-    ubyte remember_after_reset_in_id7_individual:          1 <read = getYesNo>; // u16 bit  7 (was "ecoplus")
+    ubyte remember_after_reset_in_id7_individual:          1 <read = getYesNo>; // u16 bit  7
     ubyte remember_after_reset_in_id6_race:                1 <read = getYesNo>; // u16 bit  6
     ubyte remember_after_reset_in_id5_eco:                 1 <read = getYesNo>; // u16 bit  5
     ubyte remember_after_reset_in_id4_offroad:             1 <read = getYesNo>; // u16 bit  4
@@ -338,10 +195,10 @@ struct {
 byte restart_value[30] <format=hex, bgcolor=cGreen, name=getSettingName>;
 // this is the default value after restart  
 
-// unknown_value_32C @ 0x32C — single byte. Empirically always 0 across all 99
+// unk_32C @ 0x32C — single byte. Empirically always 0 across all 99
 // example datasets. .bt author tested non-zero values: no observable effect.
 // Treated as reserved zero-padding.
-byte unknown_value_32C <bgcolor=cDkGray,hidden=true>;
+byte unk_32C <bgcolor=cDkGray,hidden=true>;
 
 
 // enabled profiles start here
@@ -410,7 +267,7 @@ struct{
 } settings_shown_in_HMI[12];
 
 // button section starts here
-byte unknown_7BB[2] <bgcolor=cRed>; 
+byte unk_7BB[2] <bgcolor=cRed>; 
 // almost always 00 00 , except on KV, N1, N8: Audi firmwares.
 // there it's 00 FF
 
@@ -425,14 +282,24 @@ ubyte button_type[5] <bgcolor=cDkGreen>;
 // FD  on Tiguan R (has enabled steering wheel FPA buttons)
 // FE  on Tiguan R (has enabled steering wheel FPA buttons)
 
+// VALUE ANALYSIS (99 files, 7 distinct rows): byte 0 in {0,1,3,4}, bytes 1-2
+// in {0,1} (paired, only set together). Byte 0 = 4 confirmed on
+// J600/L900/OZ00/PF00/TC00/TK00 clusters (matches "can rotate in 2
+// directions?" hypothesis grouping). 0x03 seen once, on MZ0N.fpa.
 ubyte button_behavior[5] <bgcolor=cYellow>;
 // 0 = disabled
 // 1 = enabled
+// 3 = ? (seen once on MZ0N)
 // 4 = can rotate in 2 directions?
 // there are 5 bytes, because there's room for 5 buttons.
 // TODO: test other values
 
- 
+
+// VALUE ANALYSIS (99 files, 6 distinct rows): byte 0 in {0,1}, bytes 1-2 in
+// {0,1,5}. The documented "03 = only open FPA dialog" value was NOT observed
+// in byte 0 across this corpus — if real, it must appear in a dataset outside
+// this example set, or in bytes 1-2 (not tested here). 05 confirmed only on
+// MZ00.
 byte button_action[5] <bgcolor=cDkYellow>;
 // 01 = button press cycles through the modes
 // 03 = only open FPA dialog, no selection by button
@@ -453,16 +320,24 @@ ubyte button_profile_list_number[5]<bgcolor=cDkGreen >;
 
 
 struct {
-    ubyte list_0_unknown_property: 4;
+    // unk_button_list_N_hi — high nibble, per-slot. VERIFIED (99 files):
+    // almost always 0 (76/99), but NOT pure padding — a handful of files set
+    // a single high-nibble slot to 0xF/0xE/0xD at one specific matrix
+    // position (19x value 15 at slot 5, 3x value 14 at slot 4, 1x value 13 at
+    // slot 9). This lines up with the "highly probable to be split bytes"
+    // note below about button_profile_lists holding values >15 (221/232/241)
+    // — this high nibble is plausibly the missing upper half for those
+    // out-of-range profile-id references.
+    ubyte unk_button_list_0_hi: 4;
     ubyte list_0:4 <bgcolor=cLtGreen, name=(this == 0 ? "None" : getFPAName(FPA_profile[this-1]))>;
-    
-    ubyte list_1_unknown_property: 4;
+
+    ubyte unk_button_list_1_hi: 4;
     ubyte list_1:4 <bgcolor=cGreen, name=(this == 0 ? "None" : getFPAName(FPA_profile[this-1]))>;
-    
-    ubyte list_2_unknown_property: 4;
+
+    ubyte unk_button_list_2_hi: 4;
     ubyte list_2:4 <bgcolor=cGreen, name=(this == 0 ? "None" : getFPAName(FPA_profile[this-1]))>;
-    
-    ubyte list_3_unknown_property: 4;
+
+    ubyte unk_button_list_3_hi: 4;
     ubyte list_3:4 <bgcolor=cDkGreen, name=(this == 0 ? "None" : getFPAName(FPA_profile[this-1]))>;
 } button_profile_lists[8] <optimize=true>;
 
@@ -479,62 +354,36 @@ struct {
 // Todo: find out that's the logic behind this.
 
     struct {
-    // the following need more research.
-    ubyte unknown_button_data_7F6[4] <bgcolor=cYellow>;
-    // known (dec) values:
-    // 0
-    // 1
-    // 2
-    // 5
-    // 3rd and 4th are always 00
-    
-    ubyte unknown_button_data_7FA[4]<bgcolor=cDkYellow>;
-    // known (dec) values:
-    // 0
-    // 2
-    // 3
-    // 6
-    // 9
-    // 12
-    
-    
-    
-    ubyte unknown_button_data_7FE[4]<bgcolor=cRed>;
-    // 0x7FE:
-    // 1st and 3rd byte always 0. Are these SHORT values instead of bytes?
-    // known (dec) values for 2nd byte:
-    // 2    most datasets, on the 2nd byte
-    // 4    on J7 and OT, which both have an eco button
-    // 16   on KN
-    // 18   on MZ
-    // 26   on J4
-    // 34   on KV
-    // 
-    // known (dec) values for 4th byte:
-    // 2
-    // 6
-    // 18
-    // 22
-    // 23
-    // 66
-    
-    
-    
-    ubyte unknown_button_data_802[4]<bgcolor=cLtRed>;
-    // 0x802:
-    // 1st, 3rd and 4th byte always 0. Are these SHORT values instead of bytes?
-    // 2nd byte:
-    // 18   MZ
-    // 66   PF
-    
-    
-    ubyte unknown_button_data_806_screen_behavior[5]<bgcolor=cRed>;    
+    // VERIFIED across all 99 example datasets. Byte 0 in {0,1,2,5}; byte 1 in
+    // {0,1,2} (only nonzero when byte0 also nonzero); bytes 2-3 always 0.
+    // Distinct rows: [0,0,0,0]x53 [1,0,0,0]x19 [2,0,0,0]x15 [2,1,0,0]x5
+    // [1,2,0,0]x3 [5,0,0,0]x3 [1,1,0,0]x1(PF00). Still no confirmed semantic
+    // mapping — kept yellow (uncertain, not unknown-red).
+    ubyte unk_button_7F6[4] <bgcolor=cYellow>;
+
+    // VERIFIED: byte 0 in {0,1,2,3,9}; bytes 2-3 usually 0xFF (unused-marker)
+    // except a small MX/NB/NC/2038/MZ/TE/TK/TL cluster where byte1/2/3 carry
+    // real small values (2,3,6,8,12) instead of 0xFF padding. 15 distinct rows
+    // total.
+    ubyte unk_button_7FA[4]<bgcolor=cDkYellow>;
+
+    // VERIFIED: byte 0 always 0, byte 2 always 0. Byte 1 in
+    // {0,2,4,16,18,26,34}, byte 3 in {0,2,6,18,22,23,66}.
+    ubyte unk_button_7FE[4]<bgcolor=cRed>;
+
+    // VERIFIED: bytes 0,2,3 always 0. Byte 1 in {0,18,66,67}. 67 (0x43) seen
+    // on 2038.fpa.
+    ubyte unk_button_802[4]<bgcolor=cLtRed>;
+
+    // VERIFIED: 12 distinct 5-byte rows. Byte 0 in {0,1,2,6,250}, byte 1 in
+    // {0,1,6,250}, byte 2 in {0,6}, bytes 3-4 always 0.
+    ubyte unk_button_806_screen_behavior[5]<bgcolor=cRed>;
     // known (dec) values:
     // 0
     // 1
     // 2
     // 06 = screen doesn't scroll to show all profiles, only the ones that are in the profile selection list.
-    // 250 (FA) 
+    // 250 (FA)
     // FF = no screen visible
     // FE = no screen visible
     // F0 = no screen visible
@@ -548,84 +397,46 @@ struct {
     //      6: "Title = profile name. Screen only shows the profiles that are in the list",
     //      7: "No HMI screen, only FPA icon"                               - Never seen in factory datasets.
     //      250: "Unknown"
-    
-    
-    
-    ubyte unknown_button_data_80A[3]<bgcolor=cDkRed>;
-    // known (dec) values:
-    // 1st byte:
-    // 0
-    // 3
-    // 11
-    //
-    // 2nd byte:
-    // 1
-    // 5
-    // 6
-    // 12
-    //
-    // 3rd byte:
-    // 1
-    // 2
-    // 3
-    // 9
-    
-    
-    ubyte unknown_button_data_80E[4]<bgcolor=cRed>;
-    // 1st byte:
-    // 0
-    // 1
-    //
-    // 2nd byte:
-    // 0
-    // 1 (only 1 if 1st byte = 0)
-    //
-    // 3rd byte:
-    // 2
-    // 241
-    //
-    // 4th byte:
-    // 2
-    // 241
-    
-    
-    ubyte unknown_button_data_812[4]<bgcolor=cLtRed>;
-    // 0
-    // 1
-    // 2
-    // 10
-    
-    
-    ubyte unknown_button_data_816[4]<bgcolor=cRed >;
-    // 0
-    // 1
-    // 2
-    // 33
-    // 112
-    // 113
-    // 255
-    
-} unknown_button_data;
 
-ubyte unknown_button_data_81A[3]<bgcolor=cDkRed >;
+    // unk_button_80B[3] @ 0x80B.
+    // VERIFIED (99 files, 14 distinct rows): byte 0 in {0,3,11}, byte 1 in
+    // {0,1,5,6,12}, byte 2 in {1,2,3,9}.
+    ubyte unk_button_80B[3]<bgcolor=cDkRed>;
+
+    // VERIFIED: byte 0 in {0,1}, byte 1 in {0,1} (1 only seen when byte0=0),
+    // bytes 2-3 move together as a pair: either [241,241] (0xF1,0xF1 —
+    // "unused/no value" marker) or [2,2].
+    ubyte unk_button_80E[4]<bgcolor=cRed>;
+
+    // VERIFIED: mostly all-zero (93/99). Two 3-file clusters: [0,0,2,10]
+    // (J600/OZ00/PF00) and [0,2,1,0] (KV00/N100/N800 — Audi).
+    ubyte unk_button_812[4]<bgcolor=cLtRed>;
+
+    // VERIFIED: byte 0 in {0,1,2,255}, byte 1 in {0,33,112}, byte 2 in
+    // {0,113}, byte 3 always 0.
+    ubyte unk_button_816[4]<bgcolor=cRed >;
+
+} unk_button_data;
+
+ubyte unk_button_81A[3]<bgcolor=cDkRed >;
 // 0 0 0 on most datasets
 // 1 0 0 on N1 and N8
 
-ubyte unknown_button_data_81D[10]<bgcolor=cRed >;
+ubyte unk_button_81D[10]<bgcolor=cRed >;
 // 0 0 0 0 0 0 0 0 0 0 on most datasets
 // 0 0 0 0 0 0 0 0 0 1 on MZ
 
-ubyte unknown_button_data_827[18]<bgcolor=cLtRed >; 
+ubyte unk_button_827[18]<bgcolor=cLtRed >; 
 // this needs more research.
 // 00 02 00 02 00 12 00 00 00 00 00 00 00 00 00 00 00 00 on J4 
 // 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 on all other datasets
 
-ubyte unknown_839[2]<bgcolor=cDkRed >;
+ubyte unk_839[2]<bgcolor=cDkRed >;
 // Known dec values:
 // 0 0   almost all datasets
 // 8 0   MZ
 
-ubyte unknown_83B[10]<bgcolor=cRed >;
+ubyte unk_83B[10]<bgcolor=cRed >;
 // known values:
 // all datasets: FF FF FF FF FF FF FF FF FF FF (reserved for future use?)
 // J4 has:       05 05 04 FF FF FF FF FF FF FF
@@ -633,17 +444,23 @@ ubyte unknown_83B[10]<bgcolor=cRed >;
 
 
 struct {
-        ubyte unknown_845_data[15];
-        } unknown_845_table[8]<bgcolor=cDkRed >;
+        ubyte unk_845_data[15];
+        } unk_845_table[8]<bgcolor=cDkRed >;
 // some kind of table, 8 by 15. Only J4 and MZ seem to have it. Some old gateway leftover?
 
-ubyte unknown_88D[3] <bgcolor=cDkGray, fgcolor=cGray , hidden=true>; // always 0x00;
+// unk_8BD[3] @ 0x8BD. Confirmed always 0x00 across all 99 example datasets.
+ubyte unk_8BD[3] <bgcolor=cDkGray, fgcolor=cGray , hidden=true>; // always 0x00
 
-byte unknown_8C0[2]<bgcolor=cDkRed >;
+byte unk_8C0[2]<bgcolor=cDkRed >;
+// VERIFIED (99 files, 4 distinct values): 2E00 x82 (all FPA-enabled datasets),
+// 0000 x13 (non-FPA datasets), AE00 x3 (LP07/LPH6/LPM3 — note 0xAE also
+// appears as the constant "marker" byte in unk_phev_E96 — possibly related),
+// 2600 x1 (KV00, Audi).
 // Known values:
 // 00
 // 2E (0010 1110) on all datasets with FPA
 // 26 (0010 0110) on KV00
+// AE on LP07/LPH6/LPM3 (mk8 PHEV)
 // could be some kind of feature flag, where bits set various features?
 // todo: test with this, there might be something cool inside like test mode that enables all profiles ;-)
 //
@@ -656,15 +473,20 @@ byte AID_profile_banner[12]<bgcolor=cGreen, comment=getAIDBanner>; //Determines 
 // todo: test the following decimal values:
 // 32
 
-byte unknown_setting_8CE[12]<bgcolor=cLtRed>;
+byte unk_8CE[12]<bgcolor=cLtRed>;
+// VERIFIED (99 files): all-zero except J4.
 // Only J4 has data here:
 // 00 00 17 00 00 16 00 00 00 00 00 00
 
 
-byte unknown_setting_8DA[9]<bgcolor=cRed>;
+byte unk_8DA[9]<bgcolor=cRed>;
+// VERIFIED (99 files, 7 distinct rows): byte 0 is always 0; the meaningful
+// data is in bytes 1-2. Byte 1 also takes value 9 (32/99 files, the single
+// largest cluster in the corpus). Full byte1/byte2 pairs observed: (9,0)x32
+// (1,0)x31 (1,2)x19 (0,0)x12 (6,2)x3 (1,5)x1(MZ00) (6,0)x1(TL00).
 // after setting to 123456789, the default settings on individual profile were reset.
 // Of this list of 9 bytes, only the 2nd and 3rd byte have data
-// is filled with  0, 1, 2, 5 or 6.
+// is filled with  0, 1, 2, 5, 6 or 9.
 // Possibly some kind of long press default value?
 // todo: test changing the values:
 // 0
@@ -727,37 +549,35 @@ byte gw_longcoding_controls_with_links[30]<bgcolor=cGreen, name=getLongCodingByt
 byte gw_longcoding_controls_without_links[30]<bgcolor=cDkGreen, name=getLongCodingByteName>;
 // Same list as previous one, but can be used to link one control to another.  Is used with Sailing and 4x4 features.
 
-// SettingBytes_again[30] @ 0xA67 — legacy name (kept for backward compat with
-// older .bt versions). Semantically: per-control platform/variant flag,
-// possible meaning "control category" (value 2 vs 3).
+// unk_A67[30] @ 0xA67 — per-control platform/variant flag, possible meaning
+// "control category" (value 2 vs 3).
 // Empirical clusters (see Research-stuff Printf for full mapping):
 //   3 — most controls on standard FPA datasets (~85%)
 //   2 — powertrain controls (Engine/StartStop/Gearbox) on some datasets
-//   2 — ALL active controls on Leon FR/Cupra series (combined with _more=8)
+//   2 — ALL active controls on Leon FR/Cupra series (combined with unk_A85=8)
 //   0 — only when slot is unused (control_id == 0)
 // .bt author tested values experimentally: no observable HMI/ECU behaviour
 // change, so likely a vestigial field consumed only by old firmware.
-byte SettingBytes_again[30] <bgcolor=cRed>;
-// SettingBytes_more[30] @ 0xA85 — legacy name. Companion to SettingBytes_again
-// (same per-control variant-flag role).
+byte unk_A67[30] <bgcolor=cRed>; //previously known as setting_bytes_more
+// unk_A85[30] @ 0xA85 — companion to unk_A67 (same per-control variant-flag role).
 // Empirical clusters:
 //   0 — almost all controls on every dataset
 //   8 — set for active controls in Leon FR/Cupra series (LA/LE/LG/LI/LK/LO)
 //       and (rarely) in Tiguan PHEV — coincides with feature_flags @ 0x8C0 = 0
 //       (pre/no-FPA platform marker).
-byte SettingBytes_more[30] <bgcolor=cDkRed>;
+byte unk_A85[30] <bgcolor=cDkRed>; //previously known as setting_bytes_again
 //
 // --- Hypothesis: R-vehicle / performance-variant detection (unverified) ---
 // Every confirmed Leon FR/Cupra dataset shows the SAME composite signature
 // across three independent fields at once:
-//   SettingBytes_again[i] == 2   for ALL 30 controls (not just the
+//   unk_A67[i] == 2   for ALL 30 controls (not just the
 //                                 powertrain subset seen on standard datasets)
-//   SettingBytes_more[i]  == 8   for ALL 30 controls
-//   unknown_8C0[0..1]     == 0x00 0x00 (both bytes zero)
+//   unk_A85[i]  == 8   for ALL 30 controls
+//   unk_8C0[0..1]     == 0x00 0x00 (both bytes zero)
 // On every non-R/Cupra dataset seen so far, this exact triple never co-occurs:
-// unknown_8C0 is either 0x2E or 0x26 (bit 3 differs: 0x2E=0010'1110 vs
+// unk_8C0 is either 0x2E or 0x26 (bit 3 differs: 0x2E=0010'1110 vs
 // 0x26=0010'0110 — possibly a KV00-specific sub-flag) whenever FPA is present,
-// and SettingBytes_again/_more follow the (3,0)/(2,0) clustering instead.
+// and unk_A67/unk_A85 follow the (3,0)/(2,0) clustering instead.
 // This raises the possibility that the combination "_again==2 AND _more==8
 // AND 0x8C0==0" for ALL controls is not really a "pre/no-FPA platform marker"
 // as previously assumed, but rather a positive R/Cupra-performance-hardware
@@ -765,7 +585,7 @@ byte SettingBytes_more[30] <bgcolor=cDkRed>;
 // DCC/torque-vectoring hardware that could plausibly need a distinct
 // low-level marker independent of whether FPA itself is enabled).
 // Caveats / why this is still just a hypothesis (~30% confidence):
-//   - unknown_8C0==0 alone is also seen on some genuinely non-FPA legacy
+//   - unk_8C0==0 alone is also seen on some genuinely non-FPA legacy
 //     datasets, so 0x8C0 in isolation is NOT a reliable R-vehicle signal.
 //   - No non-R Cupra/Leon (i.e. same chassis, standard trim) dataset has
 //     been compared yet to falsify this — that comparison would be the next
@@ -778,31 +598,38 @@ byte SettingBytes_more[30] <bgcolor=cDkRed>;
 // the following data all seems to be related to PHEV.
 struct{
     // the following data appears to be related to Hybrid only, as it's almost completely empty on non-hybrid/PHEV datasets.
-    ubyte PHEV_unknown_AA3[8] <bgcolor=cLtRed>;
-    // KV, N1, N8:      00 01 02 03 04 00 00 01
-    // others:          00 32 33 34 00 00 00 01
-    
-    ubyte PHEV_unknown_AA9[4] <bgcolor=cRed>;
+    // VERIFIED (64 mk7 files, 5 distinct rows): 
+    //                00 01 02 00 00 00 00 01
+    // (PD/PF/PH/PO), 00 01 02 03 04 00 00 01 
+    // (KV/N1/N8),    00 32 33 00 00 00 00
+    // (MZ only).     01   
+    ubyte unk_phev_AA3[8] <bgcolor=cLtRed>;
+
+    // unk_phev_AAB[4] @ 0xAAB.
+    // VERIFIED (64 files, 3 distinct rows): FF FF FF FF (45x, most datasets),
+    // FF 08 F1 F1 (15x: O2/O3/O4/O5/ON/OO/OV/P2/P3/P4/PG/PJ/PK/PL/TE),
+    // FF 06 FF FF (4x: PD/PF/PH/PO).
+    ubyte unk_phev_AAB[4] <bgcolor=cRed>;
     // known decimal values:
     // 255, 255, 255, 255 on most datasets
-    // 255, 6    255, 255 on PD, PF, PH and PO 
+    // 255, 6    255, 255 on PD, PF, PH and PO
     // 255, 8    241, 241 on O2, O3, O4, O5, ON, OO, OV, P2, P3, P4, PG, PJ, PK, PL, TE
     
-    ubyte PHEV_unknown_AAF[4] <bgcolor=cDkGray, fgcolor=cGray , hidden=true>; // always 0xFF
+    ubyte unk_phev_padding_AAF[4] <bgcolor=cDkGray, fgcolor=cGray , hidden=true>; // always 0xFF
     
-    ubyte PHEV_unknown_AB3[4] <bgcolor=cDkRed>;
+    ubyte unk_phev_AB3[4] <bgcolor=cDkRed>;
     // known decimal values:
     // 5	241	1	255
     // 5	241	241	255
     // 255	255	4	241
     // 255	255	255	255
     
-    ubyte PHEV_unknown_AB7[5] <bgcolor=cDkGray, fgcolor=cGray , hidden=true>; // always 0xFF
-    ubyte PHEV_unknown_ABC <bgcolor=cDkRed>; // always 0xFF, except on MZ: 5
-    ubyte PHEV_unknown_ABD[9] <bgcolor=cDkGray, fgcolor=cGray , hidden=true>; // always 0xFF
-    ubyte PHEV_unknown_AC6[26] <bgcolor=cDkGray, fgcolor=cGray , hidden=true>; // always 0x00
-    ubyte PHEV_unknown_AE0[14] <bgcolor=cDkGray, fgcolor=cGray , hidden=true>; // always 0xFF
-    ubyte PHEV_unknown_AEE[14] <bgcolor=cDkGray, fgcolor=cGray , hidden=true>; // always: 00 FF 00 00 FF FF FF FF FF FF FF 00 00 00
+    ubyte unk_phev_padding_AB7[5] <bgcolor=cDkGray, fgcolor=cGray , hidden=true>; // always 0xFF
+    ubyte unk_phev_ABC <bgcolor=cDkRed>; // always 0xFF, except on MZ: 5
+    ubyte unk_phev_padding_ABD[9] <bgcolor=cDkGray, fgcolor=cGray , hidden=true>; // always 0xFF
+    ubyte unk_phev_padding_AC6[26] <bgcolor=cDkGray, fgcolor=cGray , hidden=true>; // always 0x00
+    ubyte unk_phev_padding_AE0[14] <bgcolor=cDkGray, fgcolor=cGray , hidden=true>; // always 0xFF
+    ubyte unk_phev_const_AEE[14] <bgcolor=cDkGray, fgcolor=cGray , hidden=true>; // always: 00 FF 00 00 FF FF FF FF FF FF FF 00 00 00
     
     // note: there are quite a few 14-sized shapes in this area...
     
@@ -811,22 +638,31 @@ struct{
     // int16(currentRange) + int32(rangeUnit). Only MZ00 has non-zero values
     // (8/8/8) so n=1 — cannot distinguish from 3 separate ushorts. Keep as
     // ushorts pending more PHEV examples; field names provisional.
-    ushort PHEV_unknown_AFC <bgcolor=cDkRed, comment="Hyp. HybridTargetRange.maxRange (int16)">;   // always 0 0, except on MZ: 8 0
-    ushort PHEV_unknown_AFE <bgcolor=cRed, comment="Hyp. HybridTargetRange.currentRange (int16)">; // always 0 0, except on MZ: 8 0
-    ushort PHEV_unknown_B00 <bgcolor=cDkRed, comment="Hyp. HybridTargetRange.rangeUnit low word (int32 spans B00..B03)">; // always 0 0, except on MZ: 8 0
-    ubyte PHEV_unknown_B02[5] <bgcolor=cDkGray, fgcolor=cGray , hidden=true>; // always 0
-    ubyte PHEV_unknown_B08[4] <bgcolor=cDkRed>; // always 255 255, 255, 255, except on MZ: 255, 12, 12, 12
-    ubyte PHEV_unknown_B0C[4] <bgcolor=cDkGray, fgcolor=cGray , hidden=true>; // always 0xFF
-    ubyte PHEV_unknown_B0F[77] <bgcolor=cDkGray, fgcolor=cGray , hidden=true>; // 77 bytes of FF's and 00's. What's the relevance? No idea!
-    
-    ushort PHEV_unknown_B5C[20] <bgcolor=cDkRed>;    // see excelsheet
-    ubyte PHEV_unknown_B83[44] <bgcolor=cDkGray, fgcolor=cGray , hidden=true>; // always 0x00
-    ubyte PHEV_unknown_BB0[10] <bgcolor=cDkRed>;     // see excelsheet
-    ushort PHEV_unknown_BBA[10] <bgcolor=cLtRed>;    // see excelsheet
-    ubyte PHEV_unknown_BCE[10] <bgcolor=cDkRed>;     // see excelsheet
+    ushort unk_phev_AFC <bgcolor=cDkRed, comment="Hyp. HybridTargetRange.maxRange (int16)">;   // always 0 0, except on MZ: 8 0
+    ushort unk_phev_AFE <bgcolor=cRed, comment="Hyp. HybridTargetRange.currentRange (int16)">; // always 0 0, except on MZ: 8 0
+    ushort unk_phev_B00 <bgcolor=cDkRed, comment="Hyp. HybridTargetRange.rangeUnit low word (int32 spans B00..B03)">; // always 0 0, except on MZ: 8 0
+    ubyte unk_phev_padding_B02[5] <bgcolor=cDkGray, fgcolor=cGray , hidden=true>; // always 0
+    // unk_phev_B07[4] @ 0xB07. VERIFIED (64 files): FF FF FF FF (63x),
+    // FF 0C 0C 0C (1x, MZ00).
+    ubyte unk_phev_B07[4] <bgcolor=cDkRed>; // always 255 255, 255, 255, except on MZ: 255, 12, 12, 12
+    // unk_phev_padding_B0B[4] @ 0xB0B. VERIFIED: confirmed always 0xFF across
+    // all 64 mk7 files — genuine padding.
+    ubyte unk_phev_padding_B0B[4] <bgcolor=cDkGray, fgcolor=cGray , hidden=true>; // always 0xFF
+    // VERIFIED: this 77-byte block is IDENTICAL across all 64 mk7 example
+    // datasets (byte-for-byte, no variation at all) — it is empirically a
+    // fixed constant blob, not per-dataset data. Purpose still unknown;
+    // likely a fixed firmware template/filler rather than configurable data.
+    ubyte unk_phev_const_B0F[77] <bgcolor=cDkGray, fgcolor=cGray , hidden=true>; // 77 bytes of FF's and 00's, identical on every dataset seen
 
-    // SPECULATION (~45% confidence — raised from 40% in r10006 after deeper
-    // pair-pattern analysis):
+    ushort unk_phev_B5C[20] <bgcolor=cDkRed>;    // see excelsheet
+    // unk_phev_padding_B84[44] @ 0xB84. VERIFIED: confirmed always 0x00
+    // across all 64 mk7 files — genuine padding.
+    ubyte unk_phev_padding_B84[44] <bgcolor=cDkGray, fgcolor=cGray , hidden=true>; // always 0x00
+    ubyte unk_phev_BB0[10] <bgcolor=cDkRed>;     // see excelsheet
+    ushort unk_phev_BBA[10] <bgcolor=cLtRed>;    // see excelsheet
+    ubyte unk_phev_BCE[10] <bgcolor=cDkRed>;     // see excelsheet
+
+    // SPECULATION (~45% confidence):
     //
     // Four 32-byte rows form a structured lookup table of (X, Y) pairs +
     // trailing zeros. Each row's pair-count appears to live at byte 10.
@@ -864,30 +700,32 @@ struct{
     // Byte-10 hypothesis as length-prefix is consistent (P300 has [4,3,2,2]
     // matching distinct pair counts when counted by *unique non-trivial pairs*).
     struct {
-        ubyte PHEV_unknown_BD8_table_1[32] <bgcolor=cRed, comment="Hyp. (mode_id, aid_banner_id)*4 + tail">;
-        ubyte PHEV_unknown_BD8_table_2[32] <bgcolor=cDkRed, comment="Hyp. transition/priority row 2">;
-        ubyte PHEV_unknown_BD8_table_3[32] <bgcolor=cRed, comment="Hyp. transition/priority row 3">;
-        ubyte PHEV_unknown_BD8_table_4[32] <bgcolor=cDkRed, comment="Hyp. transition/priority row 4">;
-    } PHEV_unknown_BD8_table;
+        ubyte unk_phev_BD8_table_1[32] <bgcolor=cRed, comment="Hyp. (mode_id, aid_banner_id)*4 + tail">;
+        ubyte unk_phev_BD8_table_2[32] <bgcolor=cDkRed, comment="Hyp. transition/priority row 2">;
+        ubyte unk_phev_BD8_table_3[32] <bgcolor=cRed, comment="Hyp. transition/priority row 3">;
+        ubyte unk_phev_BD8_table_4[32] <bgcolor=cDkRed, comment="Hyp. transition/priority row 4">;
+    } unk_phev_BD8_table;
     
-    ubyte PHEV_unknown_C58[22] <bgcolor=cLtRed>;     // see excelsheet
+    ubyte unk_phev_C58[22] <bgcolor=cLtRed>;     // see excelsheet
     
     
-    ubyte PHEV_unknown_C6E[107] <bgcolor=cDkGray, fgcolor=cGray , hidden=true>;     // see excelsheet
-    ubyte PHEV_unknown_CD9[1] <bgcolor=cRed>;
+    // VERIFIED (64 mk7 files): confirmed always 0x00 across the entire
+    // corpus — genuine padding.
+    ubyte unk_phev_padding_C6E[107] <bgcolor=cDkGray, fgcolor=cGray , hidden=true>;     // always 0x00
+    ubyte unk_phev_CD9[1] <bgcolor=cRed>;
     // known decimal values:
     // 0 : almost always
     // 80: N1, N8, KV (Audi datasets)
     // 42: O2, O3, O4, O5, ON, OO, OV, P2, P3, P4, PG, PJ, PK, PL, TE
-    ubyte PHEV_unknown_CDA[3] <bgcolor=cDkGray, fgcolor=cGray , hidden=true>; // always 0
-    ubyte PHEV_unknown_CDD[4] <bgcolor=cRed>;
+    ubyte unk_phev_padding_CDA[3] <bgcolor=cDkGray, fgcolor=cGray , hidden=true>; // always 0
+    ubyte unk_phev_CDD[4] <bgcolor=cRed>;
     // known decimal values:
     // 0    0 0   0   : almost always
     // 134  0 12  0   : KV, N1, N8 (Audi datasets)
     // 34   0 28  0   : MZ
     // 34   0 28  27  : O2, O3, O4, O5, ON, OO, OV, P2, P3, P4, PG, PJ, PK, PL, TE   
 
-    ubyte PHEV_unknown_CE1[11] <bgcolor=cDkGray, fgcolor=cGray , hidden=true>; // always 0
+    ubyte unk_phev_padding_CE1[11] <bgcolor=cDkGray, fgcolor=cGray , hidden=true>; // always 0
     // SPECULATION (~75% confidence — strongest of the PHEV-region hypotheses):
     // Maps to Java `BatteryControlProfileOperationSerializer` (8-bit bitmask):
     //   bit 0: charge
@@ -902,26 +740,26 @@ struct{
     // (bits 0+2 = charge + climateWithoutExternalSupply — all mainstream PHEVs:
     // Magotan/Tiguan/Passat/Arteon/Tarraco GTE). Alternative ChargeMode-enum
     // interpretation (5=DC+CONDITIONING) ruled out because PHEVs are AC-only.
-    ubyte PHEV_unknown_CEC[1] <bgcolor=cRed, comment="Hyp. BatteryControl ProfileOperation 8-bit mask (charge|climate*|seat*)">;
+    ubyte unk_phev_CEC[1] <bgcolor=cRed, comment="Hyp. BatteryControl ProfileOperation 8-bit mask (charge|climate*|seat*)">;
     // known decimal values:
     // 0    
     // 1:   O4, O5, P2
     // 5:   O2, O3, ON, OO, OV, P3, P4, PG, PJ, PK, PL, TE
 
-    ubyte PHEV_unknown_CED[9] <bgcolor=cDkGray, fgcolor=cGray , hidden=true>; // always 0
-    ubyte PHEV_unknown_CF6[1] <bgcolor=cRed>;
+    ubyte unk_phev_padding_CED[9] <bgcolor=cDkGray, fgcolor=cGray , hidden=true>; // always 0
+    ubyte unk_phev_CF6[1] <bgcolor=cRed>;
     // known decimal values:
     // 0    
     // 1: O2, O3, O4, O5, ON, OO, P2, P3, P4, PG, PJ, PK, PL, TE
 
-    ubyte PHEV_unknown_CF7[11] <bgcolor=cDkGray, fgcolor=cGray , hidden=true>; // always 0
-    ubyte PHEV_unknown_D02[10] <bgcolor=cRed>;
+    ubyte unk_phev_padding_CF7[11] <bgcolor=cDkGray, fgcolor=cGray , hidden=true>; // always 0
+    ubyte unk_phev_D02[10] <bgcolor=cRed>;
     // known decimal values:
     // 15	0	0	0	30	0	0	1	0	0   KV, N1, N8 (Audi datasets)
     // 31	0	0	0	62	0	0	1	0	0   MZ, O2, O3, O4, O5, ON, OO, OV, P2, P3, P4, PG, PJ, PK, PL, TE
 
     // hybrid_modes (0xD0C) — 12-byte CharismaOperationMode structure, confirmed
-    // across 69 PHEV .fpa datasets (confidence 97%):
+    // across the 64 mk7 example datasets (confidence 97%):
     //   bytes 0-5  : mode slot values — one CharismaOperationMode per slot
     //                (0-6 per getHybridModeName(), plus observed unknowns
     //                55/57; 0xFF = slot disabled/unused).
@@ -957,7 +795,7 @@ struct{
     // Plausibly 12 hybrid-mode-slots × 16-byte BatteryControl record. Field
     // semantics unknown without RA-serializer cross-reference. Bytes preserved
     // verbatim by all known tooling.
-    ubyte PHEV_unknown_D24[192] <bgcolor=cDkRed, comment="Hyp. 12 hybrid-slot records × 16 bytes (end-marker 0xFF at byte15)">;
+    ubyte unk_phev_D24[192] <bgcolor=cDkRed, comment="Hyp. 12 hybrid-slot records × 16 bytes (end-marker 0xFF at byte15)">;
 
     // SPECULATION (~55% confidence): 12-byte lookup table holding an FPA
     // profile-id per internal slot. Values fit dict_profiles namespace (1..15)
@@ -981,32 +819,37 @@ struct{
     // (e.g. slot 0 "Comfort" -> profile-id 6 "Race") makes no sense, so the
     // 12 DE4 slots are NOT in CharismaViewOptions display order. Per-slot
     // semantic still unknown.
-    ubyte PHEV_unknown_DE4[12] <bgcolor=cLtRed, comment="Hyp. hybrid-slot to profile-id default lookup">;
+    ubyte unk_phev_DE4[12] <bgcolor=cLtRed, comment="Hyp. hybrid-slot to profile-id default lookup">;
     // on cars with a hybrid profile, this is always:
     // 6 5 1 4 1 3 2 1 1 14 13 1   (older template)
     // 6 5 1 4 1 3 2 1 1  6  5 1   (newer template — 2022+)
     // otherwise it's zeroes.
 
-    ubyte PHEV_unknown_DF0[6] <bgcolor=cRed>;
+    ubyte unk_phev_DF0[6] <bgcolor=cRed>;
     // zeroes, but on MZ it's 0 0 3 0 0 0 
 
-    ubyte PHEV_unknown_DF6[28] <bgcolor=cDkRed>;
+    ubyte unk_phev_DF6[28] <bgcolor=cDkRed>;
 
-    ubyte PHEV_unknown_E12[4] <bgcolor=cRed>;
+    ubyte unk_phev_E12[4] <bgcolor=cRed>;
     // zeroes, but on MZ it's 3 0 0 0 
 
-    ubyte PHEV_unknown_E16[14] <bgcolor=cLtRed>;
+    ubyte unk_phev_E16[14] <bgcolor=cLtRed>;
 
-    ubyte PHEV_unknown_E24[8] <bgcolor=cRed>;
+    ubyte unk_phev_E24[8] <bgcolor=cRed>;
 
     struct{
-        ubyte PHEV_unknown_E2C_data[6];
-    }   PHEV_unknown_E2C[5] <bgcolor=cDkRed>;
+        ubyte unk_phev_E2C_data[6];
+    }   unk_phev_E2C[5] <bgcolor=cDkRed>;
 
 
-    ubyte PHEV_unknown_E4A[4] <bgcolor=cRed>;
-    ubyte PHEV_unknown_E4F[8] <bgcolor=cLtRed>; // 2 0 0 0 0 0 0 0  on MZ, 0 on all others
-    ubyte PHEV_unknown_E56[64] <bgcolor=cRed>; // looks to be 8x8 bytes or so
+    // VERIFIED (64 mk7 files): confirmed always 0x00000000 across the entire
+    // corpus — genuine padding.
+    ubyte unk_phev_padding_E4A[4] <bgcolor=cDkGray, fgcolor=cGray, hidden=true>; // always 0
+
+    // unk_phev_E4E[8] @ 0xE4E. VERIFIED (64 files): 00 00 00 00 00 00 00 00
+    // (63x), 02 00 00 00 00 00 00 00 (1x, MZ00).
+    ubyte unk_phev_E4E[8] <bgcolor=cLtRed>; // 2 0 0 0 0 0 0 0  on MZ, 0 on all others
+    ubyte unk_phev_E56[64] <bgcolor=cRed>; // looks to be 8x8 bytes or so
     // SPECULATION (~30% confidence): 7-byte config block with byte 5 always
     // 0xAE (174) as constant marker. Four templates observed:
     //   * [138, 37, 1, 34, 0, 174, 0] — 16x mainstream PHEV
@@ -1015,38 +858,44 @@ struct{
     //   * [130, 36, 1, 34, 0, 174, 0] —  1x
     // Bytes 0..2 vary by template; bytes 3=34, 4=0, 5=174, 6=0 mostly constant.
     // No Java mapping yet identified. Preserve verbatim.
-    ubyte PHEV_unknown_E96[7] <bgcolor=cDkRed, comment="Hyp. config block (byte5=0xAE marker)">; // on Hybrid cars: 138 37 1 34 0 174 0
+    ubyte unk_phev_E96[7] <bgcolor=cDkRed, comment="Hyp. config block (byte5=0xAE marker)">; // on Hybrid cars: 138 37 1 34 0 174 0
     // AID_mode_banner (0xE9D) — AID banner per hybrid-mode SLOT (NOT per FPA
     // profile slot). Index aligns with hybrid_modes[] above; profiles_aid_banner
     // at 0x8C2 is the per-profile equivalent. Like hybrid_modes, this region is
     // mk7-PHEV-only in practice.
     ubyte AID_mode_banner[12]<bgcolor=cGreen, comment=getAIDBanner>;
-    ubyte PHEV_unknown_EA9[20] <bgcolor=cDkRed>; // on Hybrid cars: 138 37 1 34 0 174 0 
-    ubyte PHEV_unknown_E4D[4] <bgcolor=cRed>;
-    ubyte PHEV_unknown_EC1[10] <bgcolor=cDkGray, fgcolor=cGray , hidden=true>; // always 0
-    ushort PHEV_unknown_ECB[4] <bgcolor=cRed>;
-    ubyte PHEV_unknown_ED3[4] <bgcolor=cDkGray, fgcolor=cGray , hidden=true>; // always 0
-    ubyte PHEV_unknown_ED7[4] <bgcolor=cDkRed>;
+    ubyte unk_phev_EA9[20] <bgcolor=cDkRed>; // on Hybrid cars: 138 37 1 34 0 174 0
+    // unk_phev_EBD[4] @ 0xEBD. VERIFIED (64 files, 3 distinct rows):
+    // 00 00 00 00 (45x, default/non-hybrid), 00 32 00 04 (16x, mainstream
+    // PHEV), 00 23 00 04 (3x, KV/N1/N8 Audi).
+    ubyte unk_phev_EBD[4] <bgcolor=cRed>;
+    ubyte unk_phev_padding_EC1[10] <bgcolor=cDkGray, fgcolor=cGray , hidden=true>; // always 0
+    ushort unk_phev_ECB[4] <bgcolor=cRed>;
+    ubyte unk_phev_padding_ED3[4] <bgcolor=cDkGray, fgcolor=cGray , hidden=true>; // always 0
+    ubyte unk_phev_ED7[4] <bgcolor=cDkRed>;
     // especially the 4th byte has a lot of variation and is set on most datasets
     // very interesting what this could be!
-    ubyte PHEV_unknown_EDB[24] <bgcolor=cDkGray, fgcolor=cGray , hidden=true>; // always 0
-    ubyte PHEV_unknown_EF3[1] <bgcolor=cRed>;
+    ubyte unk_phev_padding_EDB[24] <bgcolor=cDkGray, fgcolor=cGray , hidden=true>; // always 0
+    ubyte unk_phev_EF3[1] <bgcolor=cRed>;
     // always 0, except on O2, O3, O4, O5, ON, OO, OV, P2, P3, P4, PG, PJ, PK, PL, PM, TE. There it's 21
-    ubyte PHEV_unknown_EF4[4] <bgcolor=cDkGray, fgcolor=cGray , hidden=true>; // always 0
-    ubyte PHEV_unknown_EF8[1] <bgcolor=cRed>; // 1 on KV, otherwise 0
-    ubyte PHEV_unknown_EF9[7] <bgcolor=cDkGray, fgcolor=cGray, hidden=true>; // always 0
-    ubyte PHEV_unknown_F00[1] <bgcolor=cRed >;
+    ubyte unk_phev_padding_EF4[4] <bgcolor=cDkGray, fgcolor=cGray , hidden=true>; // always 0
+    ubyte unk_phev_EF8[1] <bgcolor=cRed>; // 1 on KV, otherwise 0
+    ubyte unk_phev_padding_EF9[7] <bgcolor=cDkGray, fgcolor=cGray, hidden=true>; // always 0
+    ubyte unk_phev_F00[1] <bgcolor=cRed >;
     // 0 : almost always
     // KV: 8
     
-    ubyte PHEV_unknown_F01[24] <bgcolor=cDkGray, fgcolor=cGray , hidden=true>; // always 0
-    ubyte PHEV_unknown_F19[2] <bgcolor=cRed >;
+    ubyte unk_phev_padding_F01[24] <bgcolor=cDkGray, fgcolor=cGray , hidden=true>; // always 0
+    ubyte unk_phev_F19[2] <bgcolor=cRed >;
     // 0 0: almost always
     // KV: 127 255
     
+    // FSeek(3867)=0xF1B is a defensive checkpoint / anchor for this offset.
     FSeek(3867);
-    ubyte PHEV_unknown_F1B[15] <bgcolor=cDkGray, fgcolor=cGray , hidden=true>; // always 0
-    ubyte PHEV_unknown_F1D[2] <bgcolor=cRed >;
+    ubyte unk_phev_padding_F1B[15] <bgcolor=cDkGray, fgcolor=cGray , hidden=true>; // always 0
+    // unk_phev_F2A[2] @ 0xF2A. VERIFIED (64 files, 3 distinct rows): 00 00
+    // (60x, almost always), 06 00 (3x: PD/PH/PO), 00 06 (1x: PF).
+    ubyte unk_phev_F2A[2] <bgcolor=cRed >;
     // 0 0: almost always
     // 6 0: on PD, PH, PO
     // 0 6: on PF
@@ -1054,11 +903,22 @@ struct{
 
 
 if (mk7) {
+    // unk_phev_padding_F2C[464] @ 0xF2C. Confirmed all-zero across all 64
+    // mk7 example datasets.
     FSeek(0xf2c);
-    ubyte PHEV_zeroes[464]<bgcolor=cDkGray, fgcolor=cGray , hidden=true>;   // all zeroes on all datasets I've seen
+    ubyte unk_phev_padding_F2C[464]<bgcolor=cDkGray, fgcolor=cGray , hidden=true>;   // all zeroes on all datasets I've seen
     LittleEndian(); // go to littleendian mode because of checksum format
 
-}       
+} else {
+    // Byte range from 0xF2C (end of PHEV_data) to FileSize()-4 (start of the
+    // CRC32 checksum) on mk8/mk8-variant datasets. VERIFIED across all 35
+    // mk8/mk8-variant example datasets (33 files @ 4088 bytes = 200-byte gap,
+    // 2 files @ 4090 bytes = 202-byte gap): always all-zero.
+    local int unk_mk8_padding_size = FileSize() - 4 - 0xf2c;
+    if (unk_mk8_padding_size > 0) {
+        ubyte unk_mk8_padding[unk_mk8_padding_size] <bgcolor=cDkGray, fgcolor=cBlack, hidden=true>;
+    }
+}
     FSeek(FileSize()-4);
     
     local int calculated_checksum;
@@ -1136,9 +996,7 @@ Printf(" Items whose individual_setting_byte is 0 are hidden in the HMI.\n");
 Printf(" Per profile we list the active controls + their selectable mode bits.\n\n");
 while (indiv_profile_number < 12) {
     if (FPA_profile[indiv_profile_number] != 0) {
-        // FIXED in r10006: was getSettingName(indiv_profile_number+1), which
-        // used the mode-id enum and printed wrong titles. Real per-slot title
-        // = FPA profile name from FPA_profile[slot].
+        // Title = FPA profile name from FPA_profile[slot] (not the mode-id enum).
         Printf(" Profile slot %i (%s): HMI shows the following settings:\n",
             indiv_profile_number,
             getFPAName(FPA_profile[indiv_profile_number]));
@@ -1188,10 +1046,9 @@ while (indivgroup_setting_number < 30) {
         if (grouped_controls[indivgroup_setting_number] == group_number) {
             // Group-header = authoritative group_member_request_values_controls[g-1]
             // at offset 0x206, NOT list_of_grouped_controls[g-1] (which is a
-            // separate per-display-slot ordering). Previous hack of using
-            // [g-2] only for group 4 worked on a couple of datasets but was
-            // wrong in general — non-monotone layouts (LPM0 etc.) need the
-            // header-ID directly from the dedicated 8-slot field.
+            // separate per-display-slot ordering). Non-monotone layouts
+            // (LPM0 etc.) require the header-ID directly from the dedicated
+            // 8-slot field.
             Printf("    Group %i (%s): %s (%02x) - 0x38 Matrix line: %i\n",
                 group_number,
                 getControlName(group_member_request_values_controls[group_number-1]),
@@ -1350,16 +1207,16 @@ if (rv_count == 0) {
     Printf(" (no active controls in list_of_grouped_controls)\n");
 }
 
-printTitle("Research — unknown_setting_8DA[9] (offset 0x8DA)");
+printTitle("Research — unk_8DA[9] (offset 0x8DA)");
 // Possibly default-after-long-press values. Each byte 0..6 observed.
 // On most datasets only bytes 1 and 2 are non-zero; byte 0 = 0 always seen.
 Printf(" Raw bytes:");
 for (i = 0; i < 9; i++) {
-    Printf(" %i", unknown_setting_8DA[i]);
+    Printf(" %i", unk_8DA[i]);
 }
 Printf("\n");
 
-printTitle("Research — per-control variant flags (SettingBytes_again @ 0xA67 + SettingBytes_more @ 0xA85)");
+printTitle("Research — per-control variant flags (unk_A67 @ 0xA67 + unk_A85 @ 0xA85)");
 // These two parallel 30-byte arrays appear to encode platform/variant flags
 // per control. Empirical clustering:
 //   (3, 0)  most controls on standard FPA datasets
@@ -1374,8 +1231,8 @@ for (i = 0; i < 30; i++) {
         Printf("  %2i  %-30s     %i      %i\n",
             i,
             getControlName(list_of_controls[i]),
-            SettingBytes_again[i],
-            SettingBytes_more[i]);
+            unk_A67[i],
+            unk_A85[i]);
     }
 }
 
@@ -1383,51 +1240,62 @@ for (i = 0; i < 30; i++) {
 // ---- PHEV region map: one-line overview of every annotated PHEV slot ----
 // Renders only when the file is mk7-sized (PHEV region absent on mk8).
 if (mk7) {
-    printTitle("PHEV region map (0xAA3 .. 0xF1B)");
+    printTitle("PHEV region map (0xAA3 .. 0xF2C)");
     Printf(" Compact overview of all PHEV-region byte ranges. `H~%%` = our\n");
     Printf(" hypothesis confidence; `KNOWN` means decoded + deployed.\n\n");
     Printf(" Offset  Size  Name                                Hypothesis            H~%%\n");
     Printf(" ------  ----  ----------------------------------  --------------------  -----\n");
-    Printf(" 0xAA3      8  PHEV_unknown_AA3                    (unknown)              -\n");
-    Printf(" 0xAA9      4  PHEV_unknown_AA9                    (unknown)              -\n");
-    Printf(" 0xAB3      4  PHEV_unknown_AB3                    (unknown)              -\n");
-    Printf(" 0xABC      1  PHEV_unknown_ABC                    (unknown, MZ=5)        -\n");
-    Printf(" 0xAFC      2  HybridTargetRange.maxRange          int16                 50%%\n");
-    Printf(" 0xAFE      2  HybridTargetRange.currentRange      int16                 50%%\n");
-    Printf(" 0xB00      4  HybridTargetRange.rangeUnit         int32 (BE-split?)     50%%\n");
-    Printf(" 0xB08      4  PHEV_unknown_B08                    (unknown)              -\n");
-    Printf(" 0xB5C     40  PHEV_unknown_B5C[20] ushort         (research)             -\n");
-    Printf(" 0xBB0     10  PHEV_unknown_BB0                    (research)             -\n");
-    Printf(" 0xBBA     20  PHEV_unknown_BBA[10] ushort         (research)             -\n");
-    Printf(" 0xBCE     10  PHEV_unknown_BCE                    (research)             -\n");
-    Printf(" 0xBD8    128  BD8_table[4x32]                     state-transitions     40%%\n");
-    Printf(" 0xC58     22  PHEV_unknown_C58                    (research)             -\n");
-    Printf(" 0xCD9      1  PHEV_unknown_CD9                    Audi/PHEV marker       -\n");
-    Printf(" 0xCDD      4  PHEV_unknown_CDD                    platform-specific      -\n");
-    Printf(" 0xCEC      1  battery_profile_op (BETA)           BatteryControl mask   75%%\n");
-    Printf(" 0xCF6      1  PHEV_unknown_CF6                    PHEV marker            -\n");
-    Printf(" 0xD02     10  PHEV_unknown_D02                    platform-specific      -\n");
-    Printf(" 0xD0C     12  hybrid_modes                        CharismaOperationMode 97%%  KNOWN\n");
-    Printf(" 0xD18     12  hybrid_modes_active                 companion byte         -\n");
-    Printf(" 0xD24    192  PHEV_unknown_D24                    12x16 records         35%%\n");
-    Printf(" 0xDE4     12  PHEV_unknown_DE4                    slot->profile-id      55%%\n");
-    Printf(" 0xDF0      6  PHEV_unknown_DF0                    (research)             -\n");
-    Printf(" 0xDF6     28  PHEV_unknown_DF6                    (research)             -\n");
-    Printf(" 0xE12      4  PHEV_unknown_E12                    (research)             -\n");
-    Printf(" 0xE16     14  PHEV_unknown_E16                    (research)             -\n");
-    Printf(" 0xE24      8  PHEV_unknown_E24                    (research)             -\n");
-    Printf(" 0xE2C     30  PHEV_unknown_E2C[5][6]              (research)             -\n");
-    Printf(" 0xE4A      4  PHEV_unknown_E4A                    (research)             -\n");
-    Printf(" 0xE56     64  PHEV_unknown_E56                    (research, 8x8?)       -\n");
-    Printf(" 0xE96      7  PHEV_unknown_E96                    config + 0xAE marker  30%%\n");
-    Printf(" 0xE9D     12  AID_mode_banner                     per-hybrid-slot banner 85%%  KNOWN\n");
-    Printf(" 0xEA9     20  PHEV_unknown_EA9                    (research)             -\n");
-    Printf(" 0xED7      4  PHEV_unknown_ED7                    (research)             -\n");
-    Printf(" 0xEF3      1  PHEV_unknown_EF3                    newer-PHEV marker      -\n");
-    Printf(" 0xF00      1  PHEV_unknown_F00                    KV=8 else 0            -\n");
-    Printf(" 0xF19      2  PHEV_unknown_F19                    DCC-slider variant     -\n");
-    Printf(" 0xF1B     15  PHEV_unknown_F1B (zeros)            reserved               -\n");
-    Printf(" 0xF1D      2  PHEV_unknown_F1D                    (research)             -\n");
+    Printf(" 0xAA3      8  unk_phev_AA3                         (unknown)              -\n");
+    Printf(" 0xAAB      4  unk_phev_AAB                         (unknown)              -\n");
+    Printf(" 0xAB3      4  unk_phev_AB3                         (unknown)              -\n");
+    Printf(" 0xABC      1  unk_phev_ABC                         (unknown, MZ=5)        -\n");
+    Printf(" 0xAFC      2  HybridTargetRange.maxRange           int16                 50%%\n");
+    Printf(" 0xAFE      2  HybridTargetRange.currentRange       int16                 50%%\n");
+    Printf(" 0xB00      4  HybridTargetRange.rangeUnit          int32 (BE-split?)     50%%\n");
+    Printf(" 0xB07      4  unk_phev_B07                         (unknown)              -\n");
+    Printf(" 0xB0F     77  unk_phev_const_B0F                   fixed const blob      70%%\n");
+    Printf(" 0xB5C     40  unk_phev_B5C[20] ushort               (research)             -\n");
+    Printf(" 0xBB0     10  unk_phev_BB0                          (research)             -\n");
+    Printf(" 0xBBA     20  unk_phev_BBA[10] ushort               (research)             -\n");
+    Printf(" 0xBCE     10  unk_phev_BCE                          (research)             -\n");
+    Printf(" 0xBD8    128  unk_phev_BD8_table[4x32]              state-transitions     40%%\n");
+    Printf(" 0xC58     22  unk_phev_C58                          (research)             -\n");
+    Printf(" 0xCD9      1  unk_phev_CD9                          Audi/PHEV marker       -\n");
+    Printf(" 0xCDD      4  unk_phev_CDD                          platform-specific      -\n");
+    Printf(" 0xCEC      1  unk_phev_CEC (BETA)                   BatteryControl mask   75%%\n");
+    Printf(" 0xCF6      1  unk_phev_CF6                          PHEV marker            -\n");
+    Printf(" 0xD02     10  unk_phev_D02                          platform-specific      -\n");
+    Printf(" 0xD0C     12  hybrid_modes                          CharismaOperationMode 97%%  KNOWN\n");
+    Printf(" 0xD18     12  hybrid_modes_active                   companion byte         -\n");
+    Printf(" 0xD24    192  unk_phev_D24                          12x16 records         35%%\n");
+    Printf(" 0xDE4     12  unk_phev_DE4                          slot->profile-id      55%%\n");
+    Printf(" 0xDF0      6  unk_phev_DF0                          (research)             -\n");
+    Printf(" 0xDF6     28  unk_phev_DF6                          (research)             -\n");
+    Printf(" 0xE12      4  unk_phev_E12                          (research)             -\n");
+    Printf(" 0xE16     14  unk_phev_E16                          (research)             -\n");
+    Printf(" 0xE24      8  unk_phev_E24                          (research)             -\n");
+    Printf(" 0xE2C     30  unk_phev_E2C[5][6]                    (research)             -\n");
+    Printf(" 0xE4A      4  unk_phev_padding_E4A (zeros)          reserved               -\n");
+    Printf(" 0xE4E      8  unk_phev_E4E                          (research)             -\n");
+    Printf(" 0xE56     64  unk_phev_E56                          (research, 8x8?)       -\n");
+    Printf(" 0xE96      7  unk_phev_E96                          config + 0xAE marker  30%%\n");
+    Printf(" 0xE9D     12  AID_mode_banner                       per-hybrid-slot banner 85%%  KNOWN\n");
+    Printf(" 0xEA9     20  unk_phev_EA9                          (research)             -\n");
+    Printf(" 0xEBD      4  unk_phev_EBD                          (research)             -\n");
+    Printf(" 0xED7      4  unk_phev_ED7                          (research)             -\n");
+    Printf(" 0xEF3      1  unk_phev_EF3                          newer-PHEV marker      -\n");
+    Printf(" 0xF00      1  unk_phev_F00                          KV=8 else 0            -\n");
+    Printf(" 0xF19      2  unk_phev_F19                          DCC-slider variant     -\n");
+    Printf(" 0xF1B     15  unk_phev_padding_F1B (zeros)          reserved               -\n");
+    Printf(" 0xF2A      2  unk_phev_F2A                          (research)             -\n");
+    Printf(" 0xF2C    464  unk_phev_padding_F2C (zeros, mk7)     reserved               -\n");
+}
+if (!mk7) {
+    printTitle("mk8 trailing gap (0xF2C .. checksum)");
+    Printf(" %i bytes between the end of PHEV_data (0xF2C) and the CRC32\n",
+        FileSize() - 4 - 0xf2c);
+    Printf(" checksum. Confirmed all-zero across all 35 mk8/mk8-variant\n");
+    Printf(" example datasets. Declared as unk_mk8_padding.\n");
 }
 
 printTitle("Checksum");
@@ -1468,13 +1336,13 @@ string getSettingName(int settingNumber) {
     }
 }
 
-// hybrid_modes (0xD0C) offset + 12-byte structure validated across 69 PHEV
-// .fpa datasets (confidence 97%): bytes 0-5 hold up to 6 CharismaOperationMode
-// slot values (0-6, plus observed unknowns 55/57; 0xFF = disabled slot), and
-// bytes 6-11 hold a per-slot activation flag (0x02 = enabled, 0xFF = disabled,
-// 0x00 = unused). All 6 getHybridModeName() mapping values below (1-6) have
-// been confirmed present in real datasets, alongside the two unmapped-but-seen
-// values 55 and 57.
+// hybrid_modes (0xD0C) offset + 12-byte structure validated across the 64 mk7
+// PHEV .fpa example datasets (confidence 97%): bytes 0-5 hold up to 6
+// CharismaOperationMode slot values (0-6, plus observed unknowns 55/57;
+// 0xFF = disabled slot), and bytes 6-11 hold a per-slot activation flag
+// (0x02 = enabled, 0xFF = disabled, 0x00 = unused). All 6 getHybridModeName()
+// mapping values below (1-6) have been confirmed present in real datasets,
+// alongside the two unmapped-but-seen values 55 and 57.
 //
 // helper function to get hybrid-mode (CharismaOperationMode) name
 // Values derived from Java DSi DTO `CharismaOperationMode` + observed datasets
@@ -1575,9 +1443,6 @@ string getControlName(int i) {
         case 57: j = "DoubleClutch"; break;            // Double clutch transmission control
         case 58: j = "TorqueSplitter"; break;          // Torque splitter (AWD distribution)
         case 59: j = "Recuperation"; break;            // Energy recuperation (hybrid/EV)
-        // The following IDs were observed in newer / mk8 firmwares 
-        case 58: j = "Unknown 58"; break;              // possibly dynamic chassis
-        case 59: j = "Unknown 59"; break;
         case 60: j = "Unknown 60"; break;
         case 61: j = "Unknown 61"; break;
         case 62: j = "Unknown 62"; break;
@@ -1727,6 +1592,7 @@ string getIndividualSettingName(int settingNumber) {
 //   8=RANGE, 9=LIFT, 10=OFFROADLEVEL2, 11=OFFROADLEVEL3, 12=OFFROADLEVEL4, 13=OFFROADLEVEL5, 14=OFFROADLEVEL6,
 //   15=HYBRIDSPORT, 16=TORQUEVECTORING, 17=RACETRACK, 18=ADAPTIVE, 19=TRACTION
 // (Dataset slot IDs may differ from DSI enum IDs due to vehicle-specific configurations)
+// fully confirmed on car
 
 string getFPAName(int settingNumber) {
     switch (settingNumber) {
@@ -1850,13 +1716,9 @@ void printBitmaskRow(int rowIndex, int controlId, int bitmask) {
 // groupMemberMatrixPosition — maps a sub-control's position in list_of_controls[30]
 // to the matrix-line index (0..63) inside group_children_request_values[32][15].
 //
-// Previously this used "max group seen so far" tracking which only works for
-// monotone group layouts (e.g. OC's [1,1,1,1,2,2,...]) and BROKE on non-monotone
-// layouts like LPM0's [1,1,1,4,4,3,2,2,5,6,6]. The hack `if (group==4) group=3;`
-// was a partial patch for that bug.
-//
-// Correct algorithm (mirrors the Python app_fpa parser): "count earlier
-// positions belonging to the SAME group" — works for any layout.
+// Algorithm (mirrors the Python app_fpa parser): "count earlier positions
+// belonging to the SAME group" — works for any group layout, including
+// non-monotone ones (e.g. LPM0's [1,1,1,4,4,3,2,2,5,6,6]).
 //
 // Matrix-line formula: line = factor*16 + sub_order + 2*(group-1)
 // where (factor, sub_order) come from how many earlier positions share this group.
