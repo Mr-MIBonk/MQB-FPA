@@ -647,6 +647,9 @@ byte unknown_8C0[2]<bgcolor=cDkRed >;
 // could be some kind of feature flag, where bits set various features?
 // todo: test with this, there might be something cool inside like test mode that enables all profiles ;-)
 //
+// DRIFT mode (profile 0x10 / 16): Activated via _mda_setProfileById(16L) which triggers
+// popup confirmation dialog (ViewModel.updateShowPopup). Special handling: not in
+// onroad profiles list, requires explicit user acceptance before activation.
 
 
 byte AID_profile_banner[12]<bgcolor=cGreen, comment=getAIDBanner>; //Determines what banner is shown on the AID when selecting the profile
@@ -744,8 +747,19 @@ byte SettingBytes_again[30] <bgcolor=cRed>;
 //       (pre/no-FPA platform marker).
 byte SettingBytes_more[30] <bgcolor=cDkRed>;
 //
+// --- Hypothesis: R-vehicle / performance-variant detection (unverified) ---
+// Every confirmed Leon FR/Cupra dataset shows the SAME composite signature
+// across three independent fields at once:
+//   SettingBytes_again[i] == 2   for ALL 30 controls (not just the
+//                                 powertrain subset seen on standard datasets)
+//   SettingBytes_more[i]  == 8   for ALL 30 controls
+//   unknown_8C0[0..1]     == 0x00 0x00 (both bytes zero)
+// On every non-R/Cupra dataset seen so far, this exact triple never co-occurs:
+// unknown_8C0 is either 0x2E or 0x26 (bit 3 differs: 0x2E=0010'1110 vs
+// 0x26=0010'0110 — possibly a KV00-specific sub-flag) whenever FPA is present,
 // and SettingBytes_again/_more follow the (3,0)/(2,0) clustering instead.
 // This raises the possibility that the combination "_again==2 AND _more==8
+// AND 0x8C0==0" for ALL controls is not really a "pre/no-FPA platform marker"
 // as previously assumed, but rather a positive R/Cupra-performance-hardware
 // flag written by the factory flashing tool (these platforms have unique
 // DCC/torque-vectoring hardware that could plausibly need a distinct
@@ -927,8 +941,8 @@ struct{
     // NOTE: this region only carries meaningful data in mk7 (FileSize 4352)
     // PHEV / Audi datasets. mk8 (4088) tooling ignores it even when stray
     // bytes happen to look PHEV-shaped.
-    ubyte hybrid_modes[12]        <format=decimal,bgcolor=cYellow, comment=getHybridModeName>;
-    ubyte hybrid_modes_active[12] <bgcolor=cRed>;
+    ubyte hybrid_modes[12]        <format=decimal,bgcolor=cGreen, comment=getHybridModeName>;
+    ubyte hybrid_modes_active[12] <bgcolor=cDkGreen>;
     // hybrid_modes_active companion byte. Semantics still under research —
     // observed values: 0..4 mixed with stride-2 zeros (e.g. P300 [1,0,0,1,0,2,
     // 0,3,0,4,0,2]). Preserve verbatim on save.
@@ -1036,7 +1050,7 @@ struct{
     // 0 0: almost always
     // 6 0: on PD, PH, PO
     // 0 6: on PF
-} PHEV_unknown_data <fgcolor=cLtBlue>;
+} PHEV_data <fgcolor=cLtBlue>; //this is potentially all related to PHEV, but I'm not 100% convinced it is.
 
 
 if (mk7) {
